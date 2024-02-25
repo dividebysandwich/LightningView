@@ -1,0 +1,22 @@
+{
+	"version": "2.0.0",
+	"options": {
+		"env": {
+		  "RUST_BACKTRACE": "1"
+		}
+	 },
+	"tasks": [
+		{
+			"type": "cargo",
+			"command": "run",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"label": "rust: cargo run",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		}
+	]
+}
