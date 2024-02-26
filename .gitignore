@@ -17,3 +17,8 @@ Cargo.lock
 *.jpg
 *.png
 *.bmp
+*.nef
+*.arw
+*.raf
+*.raw
+
