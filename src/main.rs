@@ -1,10 +1,10 @@
 use fltk::{app::{self, MouseWheel}, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 
-fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, path: &PathBuf, fltk_supported_formats: Vec<&str>, raw_supported_formats: Vec<&str>) {
+fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, wind: &mut Window, path: &PathBuf, fltk_supported_formats: Vec<&str>, raw_supported_formats: Vec<&str>) {
     if let Ok(image) = load_image(&path.to_string_lossy(), fltk_supported_formats, raw_supported_formats) {
         let mut new_image = image.clone();
-        new_image.scale(frame.width(), frame.height(), true, true);
+        new_image.scale(wind.width(), wind.height(), true, true);
         frame.set_image(Some(new_image));
         *original_image = image;
     }
@@ -144,33 +144,46 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Failed to read directory.");
     }
 
-    wind.handle(move |wind, event| {
+    wind.handle(move |mut wind, event| {
         use fltk::enums::Event;
         match event {
             Event::MouseWheel => {
                 let dy = app::event_dy();
                 let mouse_pos = (app::event_x(), app::event_y());
-                let base_zoom_speed = 0.2; // Adjust zoom speed as needed
+                let base_zoom_speed = 0.2;
                 let mut relative_pos = (0, 0);
+                println!("Wind width/height: {}, {}", wind.width(), wind.height());
 
                 if dy == MouseWheel::Up {
                     println!("Zooming out");
                     zoom_factor -= base_zoom_speed * zoom_factor;
-                    relative_pos = (-mouse_pos.0 + wind.width() / 2, mouse_pos.1 - wind.height() / 2);
+                    relative_pos = (-mouse_pos.0 + (wind.width() as f64 / 2.0) as i32, -mouse_pos.1 + (wind.height() as f64 / 2.0) as i32);
                 } else if dy == MouseWheel::Down {
                     println!("Zooming in");
                     zoom_factor += base_zoom_speed * zoom_factor;
-                    relative_pos = (mouse_pos.0 - wind.width() / 2, -mouse_pos.1 + wind.height() / 2);
+                    relative_pos = (mouse_pos.0 - (wind.width() as f64 / 2.0) as i32, mouse_pos.1 - (wind.height() as f64 / 2.0) as i32);
                 }
+                println!("Relative pos: {:?}", relative_pos);
                 if zoom_factor < 1.0 {
-                    zoom_factor = 1.0; // Minimum zoom factor
+                    zoom_factor = 1.0; // Don't zoom out beyond the original size
                 }
-                let mut image = original_image.clone();
-                let new_width = (wind.width() as f64 * zoom_factor) as i32;
-                let new_height = (wind.height() as f64 * zoom_factor) as i32;
-                frame.set_pos(frame.x() - relative_pos.0/2, frame.y() + relative_pos.1/2);
-                image.scale(new_width, new_height, true, true);
-                frame.set_image(Some(image));
+                let new_width = (original_image.width() as f64 * zoom_factor) as i32;
+                let new_height = (original_image.height() as f64 * zoom_factor) as i32;
+                let new_pos_x = frame.x() - relative_pos.0/2;
+                let new_pos_y = frame.y() - relative_pos.1/2;
+
+                println!("Zoom factor: {}", zoom_factor);
+                println!("New X/Y: {}, {}", new_pos_x, new_pos_y);
+                println!("New width/height: {}, {}", new_width, new_height);
+
+                // Recenter image if we zoomed out all the way
+                if zoom_factor > 1.0 {
+                    frame.set_pos(new_pos_x, new_pos_y);
+                } else {
+                    frame.set_pos(0, 0);
+                }
+
+                frame.set_image(Some(original_image.copy_sized(new_width, new_height)));
                 wind.redraw(); 
                 true
             }
@@ -197,7 +210,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if !image_files.is_empty() {                            
                             current_index = (current_index + image_files.len() - 1) % image_files.len();
                             println!("Loading previous image: {}", image_files[current_index].display());
-                            load_and_display_image(&mut original_image, &mut frame, &image_files[current_index], fltk_supported_formats.to_vec(), raw_supported_formats.to_vec());
+                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], fltk_supported_formats.to_vec(), raw_supported_formats.to_vec());
                             zoom_factor = 1.0;
                             frame.set_pos(0, 0);
                             wind.redraw();
@@ -207,7 +220,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if !image_files.is_empty() {
                             current_index = (current_index + 1) % image_files.len();
                             println!("Loading next image: {}", image_files[current_index].display());
-                            load_and_display_image(&mut original_image, &mut frame, &image_files[current_index], fltk_supported_formats.to_vec(), raw_supported_formats.to_vec());
+                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], fltk_supported_formats.to_vec(), raw_supported_formats.to_vec());
                             zoom_factor = 1.0;
                             frame.set_pos(0, 0);
                             wind.redraw();

@@ -2,7 +2,12 @@
 name = "lightningview"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 fltk ={ version = "1.4.25", features = ["fltk-bundled"] }
 imagepipe = "0.5.0"
+
+
+[build-dependencies]
+winres = "0.1.12"
