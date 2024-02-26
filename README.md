@@ -16,9 +16,21 @@ This is a very slim image viewer that aims to replicate the most important funct
 
 ## Command Line Parameters:
 
+To start viewing images:
 ```
 lightningview.exe <imagefile.ext>
 ```
+
+To register as valid default program for viewing images on Windows:
+```
+lightningview.exe /register
+```
+
+To remove this registration from your windows registry and settings:
+```
+lightningview.exe /unregister
+```
+
 
 ## Controls:
 
