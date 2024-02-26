@@ -1,8 +1,28 @@
+//#[cfg(target_os = "windows")]
+//#![windows_subsystem = "windows"]
+
 use fltk::{app::{self, MouseWheel}, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 
-fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, wind: &mut Window, path: &PathBuf, fltk_supported_formats: Vec<&str>, raw_supported_formats: Vec<&str>) {
-    if let Ok(image) = load_image(&path.to_string_lossy(), fltk_supported_formats, raw_supported_formats) {
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use crate::windows::*;
+#[cfg(target_os = "unix")]
+mod notwindows;
+#[cfg(target_os = "unix")]
+use crate::notwindows::*;
+#[cfg(target_os = "macos")]
+mod notwindows;
+#[cfg(target_os = "macos")]
+use crate::notwindows::*;
+
+pub const FLTK_SUPPORTED_FORMATS: [&str; 6] = ["jpg", "jpeg", "png", "bmp", "gif", "svg"];
+pub const RAW_SUPPORTED_FORMATS: [&str; 23] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
+
+
+fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, wind: &mut Window, path: &PathBuf) {
+    if let Ok(image) = load_image(&path.to_string_lossy()) {
         let mut new_image = image.clone();
         new_image.scale(wind.width(), wind.height(), true, true);
         frame.set_image(Some(new_image));
@@ -51,13 +71,13 @@ fn load_raw(image_file: &str) -> Result<SharedImage, String> {
     }
 }
 
-fn load_image(image_file: &str, fltk_supported_formats: Vec<&str>, raw_supported_formats: Vec<&str>) -> Result<SharedImage, String> {
-    if fltk_supported_formats.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
+fn load_image(image_file: &str) -> Result<SharedImage, String> {
+    if FLTK_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match SharedImage::load(image_file) {
             Ok(image) => Ok(image),
             Err(err) => Err(format!("Error loading image: {}", err)),
         }
-    } else if raw_supported_formats.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
+    } else if RAW_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match load_raw(image_file) {
             Ok(image) => Ok(image),
             Err(err) => Err(format!("Error loading image: {}", err)),
@@ -69,17 +89,29 @@ fn load_image(image_file: &str, fltk_supported_formats: Vec<&str>, raw_supported
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let fltk_supported_formats = ["jpg", "jpeg", "png", "bmp", "gif", "svg"];
-    let raw_supported_formats = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
 
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
         println!("Usage: {} <image_file>", args[0]);
+        println!("To register as image viewer in Windows, run: {} /register", args[0]);
+        println!("To unregister, run: {} /unregister", args[0]);
         std::process::exit(1);
     }
 
     let image_file = &args[1];
+
+    if image_file.eq_ignore_ascii_case("/register") {
+        match register_urlhandler() {
+            Ok(_) => println!("Success! LightningView egistered as image viewer."),
+            Err(err) => println!("Failed to register as image viewer: {}", err),
+        }
+        std::process::exit(0);
+    } else if image_file.eq_ignore_ascii_case("/unregister") {
+        unregister_urlhandler();
+        println!("LightningView unregistered as image viewer.");
+        std::process::exit(0);
+    } 
 
     let app = app::App::default();
 
@@ -97,7 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     wind.fullscreen(true);
     let mut frame = Frame::default_fill();
 
-    let mut original_image = load_image(image_file, fltk_supported_formats.to_vec(), raw_supported_formats.to_vec())?;
+    let mut original_image = load_image(image_file)?;
     let mut image = original_image.clone();
     image.scale(wind.width(), wind.height(), true, true);
 
@@ -125,8 +157,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if let Ok(entries) = fs::read_dir(parent_dir) {
         let mut all_supported_formats: Vec<&str> = Vec::new();
-        all_supported_formats.extend(&fltk_supported_formats);
-        all_supported_formats.extend(&raw_supported_formats);
+        all_supported_formats.extend(&FLTK_SUPPORTED_FORMATS);
+        all_supported_formats.extend(&RAW_SUPPORTED_FORMATS);
         image_files = entries
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| {
@@ -210,7 +242,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if !image_files.is_empty() {                            
                             current_index = (current_index + image_files.len() - 1) % image_files.len();
                             println!("Loading previous image: {}", image_files[current_index].display());
-                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], fltk_supported_formats.to_vec(), raw_supported_formats.to_vec());
+                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index]);
                             zoom_factor = 1.0;
                             frame.set_pos(0, 0);
                             wind.redraw();
@@ -220,7 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if !image_files.is_empty() {
                             current_index = (current_index + 1) % image_files.len();
                             println!("Loading next image: {}", image_files[current_index].display());
-                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], fltk_supported_formats.to_vec(), raw_supported_formats.to_vec());
+                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index]);
                             zoom_factor = 1.0;
                             frame.set_pos(0, 0);
                             wind.redraw();
