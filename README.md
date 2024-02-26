@@ -3,7 +3,7 @@
 
 This is a very slim image viewer that aims to replicate the most important functions found in commercial software like ACDSee.
 
-##Core Design goals:
+## Core Design goals:
 
 * Lightweight
 * Cross Platform
@@ -14,13 +14,13 @@ This is a very slim image viewer that aims to replicate the most important funct
 * Basic file operations such as deletion (planned)
 * Quick way to start the default image editor (planned)
 
-##Command Line Parameters:
+## Command Line Parameters:
 
 ```
 lightningview.exe <imagefile.ext>
 ```
 
-##Controls:
+## Controls:
 
 | Input | Action |
 | ----------- | ----------- |
