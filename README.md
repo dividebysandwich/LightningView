@@ -1,4 +1,4 @@
-# LightningView
+# LightningView Image Viewer and Browser
  A lightning-fast cross-platform image viewer written in Rust
 
 This is a very slim image viewer that aims to replicate the most important functions found in commercial software like ACDSee.
