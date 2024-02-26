@@ -1,8 +1,9 @@
 use fltk::{app::{self, MouseWheel}, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
+use imagepipe::*;
 
 fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, path: &PathBuf) {
-    if let Ok(image) = SharedImage::load(&path) {
+    if let Ok(image) = load_image(&path.to_string_lossy()) {
         let mut new_image = image.clone();
         new_image.scale(frame.width(), frame.height(), true, true);
         frame.set_image(Some(new_image));
@@ -19,6 +20,57 @@ fn get_absolute_path(filename: &str) -> PathBuf {
         let mut absolute_path = env::current_dir().expect("Failed to get the current working directory");
         absolute_path.push(filename);
         absolute_path
+    }
+}
+
+fn load_raw(image_file: &str) -> Result<SharedImage, String> {
+    let (maxwidth, maxheight) = (100000, 100000);
+
+    println!("processing {}", image_file);
+
+    match imagepipe::Pipeline::new_from_file(&image_file) {
+        Ok(mut pipeline) => {
+            let default_ops = pipeline.ops.clone();
+            match pipeline.output_8bit(Some(&imagepipe::Pipeline::new_cache(100000000))) {
+                Ok(decoded) => {
+                    match fltk::image::RgbImage::new(
+                        &decoded.data,
+                        decoded.width as i32,
+                        decoded.height as i32,
+                        fltk::enums::ColorDepth::Rgb8,
+                    ) {
+                        Ok(img) => {
+                            match SharedImage::from_image(img) {
+                                Ok(shared_img) => Ok(shared_img),
+                                Err(err) => Err(format!("Error creating image: {}", err))
+                            }
+                        }
+                        Err(err) => Err(format!("Processing for \"{}\" failed: {}", image_file, err.to_string())),
+                    }
+                }
+                Err(err) => Err(format!("Processing for \"{}\" failed: {}", image_file, err.to_string()))
+            }
+        }
+        Err(err) => Err(format!("Don't know how to load \"{}\": {}", image_file, err.to_string()))
+    }
+}
+
+fn load_image(image_file: &str) -> Result<SharedImage, String> {
+    let fltk_supported_formats = ["jpg", "png", "bmp"];
+    let raw_supported_formats = ["raf", "cr2", "nef", "dng", "arw", "srf", "sr2", "pef", "x3f", "dcr", "kdc", "mef", "orf", "rw2", "rwl", "mrw", "nrw", "ptx", "cap", "iiq", "eip", "fff", "mos", "crw"];
+    if fltk_supported_formats.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
+        match SharedImage::load(image_file) {
+            Ok(image) => Ok(image),
+            Err(err) => Err(format!("Error loading image: {}", err)),
+        }
+    } else if raw_supported_formats.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
+        match load_raw(image_file) {
+            Ok(image) => Ok(image),
+            Err(err) => Err(format!("Error loading image: {}", err)),
+        }
+        
+    } else {
+        Err("Unsupported file format.".to_string())
     }
 }
 
@@ -48,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     wind.fullscreen(true);
     let mut frame = Frame::default_fill();
 
-    let mut original_image = SharedImage::load(image_file)?;
+    let mut original_image = load_image(image_file)?;
     let mut image = original_image.clone();
     image.scale(wind.width(), wind.height(), true, true);
 
@@ -80,11 +132,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter(|path| {
                 path.is_file()
                     && path != Path::new(image_file)
-                    && (path.extension().map_or(false, |ext| ext == "jpg")
-                        || path.extension().map_or(false, |ext| ext == "jpeg")
-                        || path.extension().map_or(false, |ext| ext == "png")
-                        || path.extension().map_or(false, |ext| ext == "bmp")
-                        || path.extension().map_or(false, |ext| ext == "gif")
+                    && (path.extension().map_or(false, |ext| ext.to_ascii_lowercase() == "jpg")
+                        || path.extension().map_or(false, |ext| ext.to_ascii_lowercase() == "jpeg")
+                        || path.extension().map_or(false, |ext| ext.to_ascii_lowercase() == "png")
+                        || path.extension().map_or(false, |ext| ext.to_ascii_lowercase() == "bmp")
+                        || path.extension().map_or(false, |ext| ext.to_ascii_lowercase() == "gif")
+                        || path.extension().map_or(false, |ext| ext.to_ascii_lowercase() == "raf")
                     )
             })
             .collect();

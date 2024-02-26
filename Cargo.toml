@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 fltk ={ version = "1.4.25", features = ["fltk-bundled"] }
+imagepipe = "0.5.0"
