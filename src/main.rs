@@ -184,10 +184,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     image.scale(wind.width(), wind.height(), true, true);
 
     frame.set_image(Some(image));
-//    if image_file.ends_with(".gif") {
-//        let flags = AnimGifImageFlags;
-//        frame.set_image(Some(AnimGifImage::load(image_file, frame, flags)?));
-//    }
+
     wind.end();
     wind.make_resizable(true);
     wind.show();
@@ -208,7 +205,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Parent dir: {:?}", parent_dir);
 
-
+    // Get a list of all image files in the directory
     if let Ok(entries) = fs::read_dir(parent_dir) {
         let mut all_supported_formats: Vec<&str> = Vec::new();
         all_supported_formats.extend(&IMAGEREADER_SUPPORTED_FORMATS);
@@ -218,12 +215,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| {
                 path.is_file()
-                    && path != Path::new(image_file)
                     && all_supported_formats.iter().any(|&format| path.to_string_lossy().to_lowercase().ends_with(format) 
                 )
             })
             .collect();
         image_files.sort();
+        
+        // Find out where in the list our initially loaded file is, so we can navigate to the next/previous image
         if let Some(index) = image_files.iter().position(|path| path == &absolute_path) {
             current_index = index;
         }
