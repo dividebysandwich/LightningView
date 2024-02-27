@@ -55,3 +55,18 @@ lightningview.exe /unregister
 ## TODO:
 
 * Animated GIF support
+
+## Compiling
+
+Just run the usual command:
+
+```
+cargo build --release
+```
+
+Under Linux, you may need to install additional dependencies first:
+
+```
+apt install libx11-dev libcairo-dev libxcursor-dev libxfixes-dev libxinerama-dev libxft-dev libpango1.0-dev libstdc++-11-dev
+```
+

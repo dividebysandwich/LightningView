@@ -97,8 +97,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if args.len() < 2 {
         println!("Usage: {} <image_file>", args[0]);
-        println!("To register as image viewer in Windows, run: {} /register", args[0]);
-        println!("To unregister, run: {} /unregister", args[0]);
+        #[cfg(target_os = "windows")]
+        {
+            println!("To register as image viewer in Windows, run: {} /register", args[0]);
+            println!("To unregister, run: {} /unregister", args[0]);
+        }
         std::process::exit(1);
     }
 
@@ -118,7 +121,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             std::process::exit(0);
         } 
     }
-    
+
     let app = app::App::default();
 
     // Get the screen size
