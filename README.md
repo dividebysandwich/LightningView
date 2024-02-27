@@ -11,8 +11,14 @@ This is a very slim image viewer that aims to replicate the most important funct
 * RAW file support for popular cameras
 * Browsing through the current directory with arrow keys
 * Pan/Zoom with the mouse
-* Basic file operations such as deletion (planned)
+* Basic file operations such as deletion
 * Quick way to start the default image editor (planned)
+
+## Non-goals:
+
+* Any form of image modification
+* File format conversion
+* Plugin system
 
 ## Command Line Parameters:
 
@@ -26,7 +32,12 @@ lightningview.exe <imagefile.ext>
 | ----------- | ----------- |
 | Left Cursor | Show previous image in directory |
 | Right Cursor | Show next image in directory | 
+| Home | Jump to first image in directory |
+| End | Jump to last image in directory |
+| Delete | Delete the currently viewed image file |
 | Mouse wheel | Zoom in / out |
 | Drag Mouse | Pan image|
 
+## TODO:
 
+* Animated GIF support

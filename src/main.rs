@@ -1,7 +1,7 @@
 //#[cfg(target_os = "windows")]
 //#![windows_subsystem = "windows"]
 
-use fltk::{app::{self, MouseWheel}, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
+use fltk::{app::{self, MouseWheel}, dialog, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 
 #[cfg(target_os = "windows")]
@@ -17,15 +17,18 @@ mod notwindows;
 #[cfg(target_os = "macos")]
 use crate::notwindows::*;
 
-pub const FLTK_SUPPORTED_FORMATS: [&str; 6] = ["jpg", "jpeg", "png", "bmp", "gif", "svg"];
+pub const FLTK_SUPPORTED_FORMATS: [&str; 10] = ["jpg", "jpeg", "png", "bmp", "gif", "svg", "ico", "pnm", "xbm", "xpm"];
 pub const RAW_SUPPORTED_FORMATS: [&str; 23] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
 
 
-fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, wind: &mut Window, path: &PathBuf) {
+fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64) {
     if let Ok(image) = load_image(&path.to_string_lossy()) {
         let mut new_image = image.clone();
         new_image.scale(wind.width(), wind.height(), true, true);
         frame.set_image(Some(new_image));
+        *zoom_factor = 1.0;
+        frame.set_pos(0, 0);
+        wind.redraw();
         *original_image = image;
     }
 }
@@ -134,6 +137,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     image.scale(wind.width(), wind.height(), true, true);
 
     frame.set_image(Some(image));
+//    if image_file.ends_with(".gif") {
+//        let flags = AnimGifImageFlags;
+//        frame.set_image(Some(AnimGifImage::load(image_file, frame, flags)?));
+//    }
     wind.end();
     wind.make_resizable(true);
     wind.show();
@@ -174,6 +181,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     } else {
         println!("Failed to read directory.");
+        app.quit();
+    }
+
+    if image_files.is_empty() {
+        println!("No images found in the directory. Exiting.");
+        app.quit()
     }
 
     wind.handle(move |mut wind, event| {
@@ -237,26 +250,47 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Event::KeyDown => {
                 let key = app::event_key();
+                if image_files.is_empty() {                            
+                    app.quit();
+                }
                 match key {
                     fltk::enums::Key::Left => {
-                        if !image_files.is_empty() {                            
-                            current_index = (current_index + image_files.len() - 1) % image_files.len();
-                            println!("Loading previous image: {}", image_files[current_index].display());
-                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index]);
-                            zoom_factor = 1.0;
-                            frame.set_pos(0, 0);
-                            wind.redraw();
-                        }
+                        current_index = (current_index + image_files.len() - 1) % image_files.len();
+                        println!("Loading previous image: {}", image_files[current_index].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
                     }
                     fltk::enums::Key::Right => {
-                        if !image_files.is_empty() {
-                            current_index = (current_index + 1) % image_files.len();
-                            println!("Loading next image: {}", image_files[current_index].display());
-                            load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index]);
-                            zoom_factor = 1.0;
-                            frame.set_pos(0, 0);
-                            wind.redraw();
-                        }
+                        current_index = (current_index + 1) % image_files.len();
+                        println!("Loading next image: {}", image_files[current_index].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                    }
+                    fltk::enums::Key::Home => {
+                        current_index = 0;
+                        println!("Loading first image: {}", image_files[current_index].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                    }
+                    fltk::enums::Key::End => {
+                        current_index = image_files.len() - 1;
+                        println!("Loading last image: {}", image_files[current_index].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                    }
+                    fltk::enums::Key::Delete => {
+                        if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, "Do you want to delete this image file?", "Cancel", "Delete", "") == Some(1) {
+                            println!("Delete image: {}", image_files[current_index].display());
+                            if let Err(err) = fs::remove_file(&image_files[current_index]) {
+                                println!("Failed to delete image: {}", err);
+                            } else {
+                                image_files.remove(current_index);
+                                if image_files.is_empty() {
+                                    app.quit();
+                                } else {
+                                    current_index = current_index % image_files.len();
+                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                                }
+                            }
+                        } else {
+                            println!("Delete cancelled");
+                        };
                     }
                     fltk::enums::Key::Escape => {
                         app.quit();

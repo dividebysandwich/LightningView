@@ -15,7 +15,6 @@ Cargo.lock
 
 # Don't commit test images
 *.jpg
-*.png
 *.bmp
 *.mrw
 *.arw
