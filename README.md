@@ -56,13 +56,16 @@ lightningview.exe /unregister
 
 General image formats:
 
-* PNG
-* JPEG
-* GIF
 * BMP
-* SVG
+* GIF
 * ICO
+* JPEG
+* PNG
 * PNM
+* SVG
+* TIFF
+* TGA
+* WEBP
 * XBM
 * XPM
 

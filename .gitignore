@@ -39,3 +39,6 @@ Cargo.lock
 *.mos
 *.cr2
 *.ari
+*.webp
+*.tif
+*.tga

@@ -3,6 +3,8 @@
 
 use fltk::{app::{self, MouseWheel}, dialog, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
+use image::io::Reader as ImageReader;
+use image::GenericImageView;
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -17,6 +19,7 @@ mod notwindows;
 #[cfg(target_os = "macos")]
 use crate::notwindows::*;
 
+pub const IMAGEREADER_SUPPORTED_FORMATS: [&str; 4] = ["webp", "tif", "tiff", "tga"];
 pub const FLTK_SUPPORTED_FORMATS: [&str; 10] = ["jpg", "jpeg", "png", "bmp", "gif", "svg", "ico", "pnm", "xbm", "xpm"];
 pub const RAW_SUPPORTED_FORMATS: [&str; 23] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
 
@@ -45,8 +48,43 @@ fn get_absolute_path(filename: &str) -> PathBuf {
     }
 }
 
+#[allow(unused_mut)]
+fn load_imagereader(image_file: &str) -> Result<SharedImage, String> {
+    println!("processing with Imagereader: {}", image_file);
+    match ImageReader::open(image_file) {
+        Ok(reader) => {
+            match reader.decode() {
+                Ok(decoded_image) => {
+                    let (width, height) = decoded_image.dimensions();
+                    println!("Image dimensions: {}x{}", width, height);
+                    println!("Image color type: {:?}", decoded_image.color());
+                    let mut data = decoded_image.into_rgb8().to_vec();
+                    match fltk::image::RgbImage::new(
+                        &data,
+                        width as i32,
+                        height as i32,
+                        fltk::enums::ColorDepth::Rgb8) {
+                            Ok(img) => {
+                                match SharedImage::from_image(img) {
+                                    Ok(shared_img) => Ok(shared_img),
+                                    Err(err) => Err(format!("Error creating image: {}", err))
+                                }
+                            }
+                            Err(err) => Err(format!("Processing \"{}\" failed: {}", image_file, err.to_string())),
+                        }
+                    }
+                Err(err) => Err(format!("Decoding \"{}\" failed: {}", image_file, err.to_string())),
+            
+            }
+        }
+        Err(err) => Err(format!("Don't know how to load \"{}\": {}", image_file, err.to_string())),
+    }
+
+}
+
+
 fn load_raw(image_file: &str) -> Result<SharedImage, String> {
-    println!("processing {}", image_file);
+    println!("processing as RAW: {}", image_file);
 
     match imagepipe::Pipeline::new_from_file(&image_file) {
         Ok(mut pipeline) => {
@@ -83,9 +121,13 @@ fn load_image(image_file: &str) -> Result<SharedImage, String> {
     } else if RAW_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match load_raw(image_file) {
             Ok(image) => Ok(image),
-            Err(err) => Err(format!("Error loading image: {}", err)),
+            Err(err) => Err(format!("Error loading RAW image: {}", err)),
         }
-        
+    } else if IMAGEREADER_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
+        match load_imagereader(image_file) {
+            Ok(image) => Ok(image),
+            Err(err) => Err(format!("Error loading Imagereader image: {}", err)),
+        }
     } else {
         Err("Unsupported file format.".to_string())
     }
@@ -170,6 +212,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if let Ok(entries) = fs::read_dir(parent_dir) {
         let mut all_supported_formats: Vec<&str> = Vec::new();
+        all_supported_formats.extend(&IMAGEREADER_SUPPORTED_FORMATS);
         all_supported_formats.extend(&FLTK_SUPPORTED_FORMATS);
         all_supported_formats.extend(&RAW_SUPPORTED_FORMATS);
         image_files = entries

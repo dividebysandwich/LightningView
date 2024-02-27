@@ -7,7 +7,7 @@ use std::{
 };
 use winreg::{enums::*, RegKey};
 
-use crate::{FLTK_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS};
+use crate::{FLTK_SUPPORTED_FORMATS, IMAGEREADER_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS};
 const CANONICAL_NAME: &str = "lightningview.exe";
 const PROGID: &str = "LightningViewImageFile";
 
@@ -96,6 +96,7 @@ pub fn register_urlhandler() -> io::Result<()> {
             dprog_capabilites.create_subkey("FileAssociations")?;
 
         let mut all_supported_formats: Vec<&str> = Vec::new();
+        all_supported_formats.extend(&IMAGEREADER_SUPPORTED_FORMATS);
         all_supported_formats.extend(&FLTK_SUPPORTED_FORMATS);
         all_supported_formats.extend(&RAW_SUPPORTED_FORMATS);
 
