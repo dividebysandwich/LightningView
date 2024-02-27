@@ -1,3 +1,5 @@
+![Logo](https://raw.githubusercontent.com/dividebysandwich/LightningView/main/lightningview.png)
+
 # LightningView Image Viewer and Browser
  A lightning-fast cross-platform image viewer written in Rust
 
