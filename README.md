@@ -5,7 +5,7 @@
 
 This is a very slim image viewer that aims to replicate the most important functions found in commercial software like ACDSee.
 
-## Core Design goals:
+## Core Design goals
 
 * Lightweight
 * Cross Platform
@@ -16,13 +16,13 @@ This is a very slim image viewer that aims to replicate the most important funct
 * Basic file operations such as deletion
 * Quick way to start the default image editor (planned)
 
-## Non-goals:
+## Non-goals
 
 * Any form of image modification
 * File format conversion
 * Plugin system
 
-## Command Line Parameters:
+## Command Line Parameters
 
 To start viewing images:
 ```
@@ -40,7 +40,7 @@ lightningview.exe /unregister
 ```
 
 
-## Controls:
+## Controls
 
 | Input | Action |
 | ----------- | ----------- |
@@ -52,7 +52,45 @@ lightningview.exe /unregister
 | Mouse wheel | Zoom in / out |
 | Drag Mouse | Pan image|
 
-## TODO:
+## Supported image formats
+
+General image formats:
+
+* PNG
+* JPEG
+* GIF
+* BMP
+* SVG
+* ICO
+* PNM
+* XBM
+* XPM
+
+RAW formats:
+
+* Minolta MRW
+* Sony ARW, SRF and SR2
+* Mamiya MEF
+* Olympus ORF
+* Samsung SRW
+* Epson ERF
+* Kodak KDC
+* Kodak DCS
+* Panasonic / Leica RW2
+* Fuji RAF
+* Kodak DCR
+* Adobe DNG
+* Pentax PEF
+* Canon CRW
+* Leaf IIQ
+* Hasselblad 3FR
+* Nikon NRW
+* Nikon NEF
+* Leaf MOS
+* Canon CR2
+* ARRI's ARI
+
+## TODO
 
 * Animated GIF support
 
