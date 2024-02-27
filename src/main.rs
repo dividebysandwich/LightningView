@@ -104,18 +104,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let image_file = &args[1];
 
-    if image_file.eq_ignore_ascii_case("/register") {
-        match register_urlhandler() {
-            Ok(_) => println!("Success! LightningView egistered as image viewer."),
-            Err(err) => println!("Failed to register as image viewer: {}", err),
-        }
-        std::process::exit(0);
-    } else if image_file.eq_ignore_ascii_case("/unregister") {
-        unregister_urlhandler();
-        println!("LightningView unregistered as image viewer.");
-        std::process::exit(0);
-    } 
-
+    #[cfg(target_os = "windows")]
+    {
+        if image_file.eq_ignore_ascii_case("/register") {
+            match register_urlhandler() {
+                Ok(_) => println!("Success! LightningView egistered as image viewer."),
+                Err(err) => println!("Failed to register as image viewer: {}", err),
+            }
+            std::process::exit(0);
+        } else if image_file.eq_ignore_ascii_case("/unregister") {
+            unregister_urlhandler();
+            println!("LightningView unregistered as image viewer.");
+            std::process::exit(0);
+        } 
+    }
+    
     let app = app::App::default();
 
     // Get the screen size
