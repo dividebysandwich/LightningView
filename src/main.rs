@@ -97,7 +97,9 @@ fn load_raw(image_file: &str) -> Result<SharedImage, String> {
                     ) {
                         Ok(img) => {
                             match SharedImage::from_image(img) {
-                                Ok(shared_img) => Ok(shared_img),
+                                Ok(shared_img) => {
+                                    Ok(shared_img)
+                                },
                                 Err(err) => Err(format!("Error creating image: {}", err))
                             }
                         }
@@ -110,6 +112,62 @@ fn load_raw(image_file: &str) -> Result<SharedImage, String> {
         Err(err) => Err(format!("Don't know how to load \"{}\": {}", image_file, err.to_string()))
     }
 }
+
+//Alternative processing using rawler - unfortunately much slower than imagepipe
+/*
+fn load_raw(image_file: &str) -> Result<SharedImage, String> {
+    println!("processing as RAW: {}", image_file);
+    let params = RawDecodeParams::default();
+    let input = BufReader::new(File::open(&image_file).map_err(|e| RawlerError::with_io_error("load buffer", &image_file, e).to_string())?);
+    let mut rawfile = RawFile::new(image_file, input);
+    match get_decoder(&mut rawfile) {
+      Ok(decoder) => {
+        match decoder.raw_image(&mut rawfile, params, false) {
+          Ok(rawimage) => {
+            let dev = RawDevelop::default();
+            match rawimage.clone().data {
+              RawImageData::Integer(_) => {
+                match dev.develop_intermediate(&rawimage) {
+                  Ok(image) => {
+                    let (width, height) = (rawimage.width, rawimage.height);
+                    println!("Image dimensions: {}x{}", width, height);
+                    match image.to_dynamic_image() {
+                        Some(mut dynamic_image) => {
+                            match dynamic_image.as_mut_rgb8() {
+                                Some(data)=> {
+                                    match fltk::image::RgbImage::new(
+                                    &data,
+                                    width as i32,
+                                    height as i32,
+                                    fltk::enums::ColorDepth::Rgb8) {
+                                        Ok(img) => {
+                                            match SharedImage::from_image(img) {
+                                                Ok(shared_img) => Ok(shared_img),
+                                                Err(err) => Err(format!("Error creating SharedImage: {}", err))
+                                            }
+                                        }
+                                        Err(err) => Err(format!("Processing RGBImage for \"{}\" failed: {}", image_file, err.to_string())),
+                                    }
+                                }
+                                None => Err(format!("Processing RGB for \"{}\" failed: {}", image_file, "Failed to convert to dynamic image").to_string())
+                            }
+                        },
+                        None => Err(format!("Processing DynamicImage for \"{}\" failed: {}", image_file, "Failed to convert to dynamic image").to_string())
+                    }
+                  },
+                  Err(err) => Err(format!("Processing Intermediate Image for \"{}\" failed: {}", image_file, err.to_string()))
+                }
+              },
+              RawImageData::Float(_) => todo!(),
+            }
+          },
+          Err(e) => Err(format!("Process RAW failed: {}", e.to_string())),
+        }
+      },
+      Err(e) => Err(format!("GetDecoder Failed: {}", e.to_string())),
+    }
+}
+*/
 
 fn load_image(image_file: &str) -> Result<SharedImage, String> {
     if FLTK_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
@@ -238,6 +296,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     wind.handle(move |mut wind, event| {
         use fltk::enums::Event;
         match event {
+            Event::Focus => true,
             Event::MouseWheel => {
                 let dy = app::event_dy();
                 let mouse_pos = (app::event_x(), app::event_y());

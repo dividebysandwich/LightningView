@@ -1,6 +1,6 @@
 [package]
 name = "lightningview"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 build = "build.rs"
 
@@ -11,6 +11,10 @@ image = "0.24.9"
 [dependencies.imagepipe]
 version = "0.5.0"
 path = "../imagepipe"
+[dependencies.rawler]
+version = "0.6.0"
+path = "../dnglab/rawler"
+
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.53.0", features = ["Win32_UI_Shell"]}
