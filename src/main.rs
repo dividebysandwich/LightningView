@@ -51,70 +51,51 @@ fn get_absolute_path(filename: &str) -> PathBuf {
     }
 }
 
-#[allow(unused_mut)]
 fn load_imagereader(image_file: &str) -> Result<SharedImage, String> {
     println!("processing with Imagereader: {}", image_file);
-    match ImageReader::open(image_file) {
-        Ok(reader) => {
-            match reader.decode() {
-                Ok(decoded_image) => {
-                    let (width, height) = decoded_image.dimensions();
-                    println!("Image dimensions: {}x{}", width, height);
-                    println!("Image color type: {:?}", decoded_image.color());
-                    let mut data = decoded_image.into_rgb8().to_vec();
-                    match fltk::image::RgbImage::new(
-                        &data,
-                        width as i32,
-                        height as i32,
-                        fltk::enums::ColorDepth::Rgb8) {
-                            Ok(img) => {
-                                match SharedImage::from_image(img) {
-                                    Ok(shared_img) => Ok(shared_img),
-                                    Err(err) => Err(format!("Error creating image: {}", err))
-                                }
-                            }
-                            Err(err) => Err(format!("Processing \"{}\" failed: {}", image_file, err.to_string())),
-                        }
-                    }
-                Err(err) => Err(format!("Decoding \"{}\" failed: {}", image_file, err.to_string())),
-            
-            }
-        }
-        Err(err) => Err(format!("Don't know how to load \"{}\": {}", image_file, err.to_string())),
-    }
 
+    let reader = ImageReader::open(image_file)
+        .map_err(|err| format!("Don't know how to load \"{}\": {}", image_file, err))?;
+
+    let decoded_image = reader
+        .decode()
+        .map_err(|err| format!("Decoding \"{}\" failed: {}", image_file, err))?;
+
+    let (width, height) = decoded_image.dimensions();
+    println!("Image dimensions: {}x{}", width, height);
+    println!("Image color type: {:?}", decoded_image.color());
+
+    let data = decoded_image.into_rgb8().to_vec();
+    let img = fltk::image::RgbImage::new(
+        &data,
+        width as i32,
+        height as i32,
+        fltk::enums::ColorDepth::Rgb8,
+    )
+    .map_err(|err| format!("Processing \"{}\" failed: {}", image_file, err))?;
+
+    SharedImage::from_image(img).map_err(|err| format!("Error creating image: {}", err))
 }
 
-
 fn load_raw(image_file: &str) -> Result<SharedImage, String> {
-    println!("processing as RAW: {}", image_file);
+    println!("Processing as RAW: {}", image_file);
 
-    match imagepipe::Pipeline::new_from_file(&image_file) {
-        Ok(mut pipeline) => {
-            match pipeline.output_8bit(Some(&imagepipe::Pipeline::new_cache(100000000))) {
-                Ok(decoded) => {
-                    match fltk::image::RgbImage::new(
-                        &decoded.data,
-                        decoded.width as i32,
-                        decoded.height as i32,
-                        fltk::enums::ColorDepth::Rgb8,
-                    ) {
-                        Ok(img) => {
-                            match SharedImage::from_image(img) {
-                                Ok(shared_img) => {
-                                    Ok(shared_img)
-                                },
-                                Err(err) => Err(format!("Error creating image: {}", err))
-                            }
-                        }
-                        Err(err) => Err(format!("Processing for \"{}\" failed: {}", image_file, err.to_string())),
-                    }
-                }
-                Err(err) => Err(format!("Processing for \"{}\" failed: {}", image_file, err.to_string()))
-            }
-        }
-        Err(err) => Err(format!("Don't know how to load \"{}\": {}", image_file, err.to_string()))
-    }
+    let mut pipeline = imagepipe::Pipeline::new_from_file(image_file)
+        .map_err(|err| format!("Don't know how to load \"{}\": {}", image_file, err))?;
+
+    let decoded = pipeline
+        .output_8bit(Some(&imagepipe::Pipeline::new_cache(100_000_000)))
+        .map_err(|err| format!("Processing for \"{}\" failed: {}", image_file, err))?;
+
+    let img = fltk::image::RgbImage::new(
+        &decoded.data,
+        decoded.width as i32,
+        decoded.height as i32,
+        fltk::enums::ColorDepth::Rgb8,
+    )
+    .map_err(|err| format!("Processing for \"{}\" failed: {}", image_file, err))?;
+
+    SharedImage::from_image(img).map_err(|err| format!("Error creating image: {}", err))
 }
 
 //Alternative processing using rawler - unfortunately much slower than imagepipe
