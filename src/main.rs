@@ -52,7 +52,7 @@ fn get_absolute_path(filename: &str) -> PathBuf {
 }
 
 fn load_imagereader(image_file: &str) -> Result<SharedImage, String> {
-    println!("processing with Imagereader: {}", image_file);
+    println!("Processing with Imagereader: {}", image_file);
 
     let reader = ImageReader::open(image_file)
         .map_err(|err| format!("Don't know how to load \"{}\": {}", image_file, err))?;
