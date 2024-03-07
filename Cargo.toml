@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 const_format = "0.2.32"
-fltk ={ version = "1.4.25" }
+fltk ={ version = "1.4.25", features = ["fltk-bundled"] }
 image = "0.24.9"
 [dependencies.imagepipe]
 version = "0.5.0"
