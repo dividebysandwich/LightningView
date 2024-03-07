@@ -1,7 +1,7 @@
 on: [release, workflow_dispatch]
 
 jobs:
-  release:
+  release-windows:
     name: release ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
@@ -10,8 +10,6 @@ jobs:
         include:
           - target: x86_64-pc-windows-gnu
             archive: zip
-          - target: x86_64-unknown-linux-musl
-            archive: tar.gz tar.xz tar.zst
     steps:
       - name: Checkout dnglab
         uses: actions/checkout@v4.1.1
@@ -26,12 +24,56 @@ jobs:
       - uses: actions/checkout@v4.1.1
         with:
           path: lightningview
-      - name: Compile and release
+      
+      - name: Compile and release windows
         uses: rust-build/rust-build.action@v1.4.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRC_DIR: lightningview
-          PRE_BUILD: sudo ln -s /bin/g++ /bin/musl-g++
         with:
           RUSTTARGET: ${{ matrix.target }}
           ARCHIVE_TYPES: ${{ matrix.archive }}
+
+  release-linux:
+    name: release ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive: zip
+    steps:
+      - name: Checkout dnglab
+        uses: actions/checkout@v4.1.1
+        with:
+          repository: dividebysandwich/dnglab
+          path: dnglab
+      - name: Checkout imagepipe
+        uses: actions/checkout@v4.1.1
+        with:
+          repository: dividebysandwich/imagepipe
+          path: imagepipe
+      - uses: actions/checkout@v4.1.1
+        with:
+          path: lightningview
+          
+      - name: Compile linux
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release          
+          tar czvf ../../../lightningview-${{ matrix.target }}.tar.gz lightningview
+          cd -
+      - name: Publish
+        uses: softprops/action-gh-release@v1
+        # TODO: if any of the build step fails, the release should be deleted.
+        with:
+            files: 'lightningview*'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
