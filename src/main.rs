@@ -13,14 +13,6 @@ use image::GenericImageView;
 mod windows;
 #[cfg(target_os = "windows")]
 use crate::windows::*;
-#[cfg(target_os = "unix")]
-mod notwindows;
-#[cfg(target_os = "unix")]
-use crate::notwindows::*;
-#[cfg(target_os = "macos")]
-mod notwindows;
-#[cfg(target_os = "macos")]
-use crate::notwindows::*;
 
 pub const IMAGEREADER_SUPPORTED_FORMATS: [&str; 4] = ["webp", "tif", "tiff", "tga"];
 pub const FLTK_SUPPORTED_FORMATS: [&str; 10] = ["jpg", "jpeg", "png", "bmp", "gif", "svg", "ico", "pnm", "xbm", "xpm"];
