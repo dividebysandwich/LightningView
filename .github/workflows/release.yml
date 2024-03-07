@@ -11,6 +11,7 @@ jobs:
           - target: x86_64-pc-windows-gnu
             archive: zip
     steps:
+      - uses: actions/checkout@v4.1.1
       - name: Checkout dnglab
         uses: actions/checkout@v4.1.1
         with:
@@ -21,7 +22,6 @@ jobs:
         with:
           repository: dividebysandwich/imagepipe
           path: imagepipe
-      - uses: actions/checkout@v4.1.1
       
       - name: Compile and release windows
         uses: rust-build/rust-build.action@v1.4.5
@@ -41,6 +41,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             archive: zip
     steps:
+      - uses: actions/checkout@v4.1.1
       - name: Checkout dnglab
         uses: actions/checkout@v4.1.1
         with:
@@ -51,7 +52,6 @@ jobs:
         with:
           repository: dividebysandwich/imagepipe
           path: imagepipe
-      - uses: actions/checkout@v4.1.1          
       - name: Compile linux
         uses: actions-rs/cargo@v1
         with:
