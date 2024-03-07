@@ -10,10 +10,10 @@ fltk ={ version = "1.4.25", features = ["fltk-bundled"] }
 image = "0.24.9"
 [dependencies.imagepipe]
 version = "0.5.0"
-path = "../imagepipe"
+path = "imagepipe"
 [dependencies.rawler]
 version = "0.6.0"
-path = "../dnglab/rawler"
+path = "dnglab/rawler"
 
 
 [target.'cfg(windows)'.dependencies]
