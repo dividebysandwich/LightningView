@@ -22,14 +22,11 @@ jobs:
           repository: dividebysandwich/imagepipe
           path: imagepipe
       - uses: actions/checkout@v4.1.1
-        with:
-          path: lightningview
       
       - name: Compile and release windows
         uses: rust-build/rust-build.action@v1.4.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SRC_DIR: lightningview
         with:
           RUSTTARGET: ${{ matrix.target }}
           ARCHIVE_TYPES: ${{ matrix.archive }}
@@ -54,10 +51,7 @@ jobs:
         with:
           repository: dividebysandwich/imagepipe
           path: imagepipe
-      - uses: actions/checkout@v4.1.1
-        with:
-          path: lightningview
-          
+      - uses: actions/checkout@v4.1.1          
       - name: Compile linux
         uses: actions-rs/cargo@v1
         with:
