@@ -27,7 +27,7 @@ jobs:
         with:
           repository: dividebysandwich/imagepipe
           path: imagepipe
-      - uses: actions/checkout@master
+      - uses: actions/checkout@v4.1.1
       - name: Compile and release
         uses: rust-build/rust-build.action@v1.4.5
         env:
