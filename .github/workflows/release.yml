@@ -18,12 +18,12 @@ jobs:
             archive: zip
     steps:
       - name: Checkout dnglab
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.1.1
         with:
           repository: dividebysandwich/dnglab
           path: dnglab
       - name: Checkout imagepipe
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.1.1
           with:
             repository: dividebysandwich/imagepipe
             path: imagepipe
