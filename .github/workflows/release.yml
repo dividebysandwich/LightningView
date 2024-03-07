@@ -52,6 +52,10 @@ jobs:
         with:
           repository: dividebysandwich/imagepipe
           path: imagepipe
+      - name: Install libraries
+        shell: bash
+        run: |
+          apt install libx11-dev libcairo-dev libxcursor-dev libxfixes-dev libxinerama-dev libxft-dev libpango1.0-dev libstdc++-11-dev
       - name: Compile linux
         uses: actions-rs/cargo@v1
         with:
