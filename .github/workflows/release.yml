@@ -1,6 +1,4 @@
-on:
-  [release, workflow_dispatch]
-    types: [created]
+on: [release, workflow_dispatch]
 
 jobs:
   release:
