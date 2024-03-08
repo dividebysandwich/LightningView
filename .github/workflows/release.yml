@@ -1,4 +1,6 @@
-on: [release, workflow_dispatch]
+on:
+  release:
+    types: [released, workflow_dispatch]
 
 jobs:
   release-windows:
