@@ -58,9 +58,9 @@ jobs:
         shell: bash
         run: sudo apt-get install --fix-missing libx11-dev libcairo-dev libxcursor-dev libxfixes-dev libxinerama-dev libxft-dev libpango1.0-dev libstdc++-11-dev
       - name: Compile linux
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@v1.0.1
         with:
-          use-cross: true
+          use-cross: false
           command: build
           args: --release --target ${{ matrix.target }}
       - name: Package
