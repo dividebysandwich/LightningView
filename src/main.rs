@@ -5,6 +5,7 @@
     windows_subsystem = "windows"
   )]
 use fltk::{app::{self, MouseWheel}, dialog, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
+
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 use image::io::Reader as ImageReader;
 use image::GenericImageView;
@@ -89,62 +90,6 @@ fn load_raw(image_file: &str) -> Result<SharedImage, String> {
 
     SharedImage::from_image(img).map_err(|err| format!("Error creating image: {}", err))
 }
-
-//Alternative processing using rawler - unfortunately much slower than imagepipe
-/*
-fn load_raw(image_file: &str) -> Result<SharedImage, String> {
-    println!("processing as RAW: {}", image_file);
-    let params = RawDecodeParams::default();
-    let input = BufReader::new(File::open(&image_file).map_err(|e| RawlerError::with_io_error("load buffer", &image_file, e).to_string())?);
-    let mut rawfile = RawFile::new(image_file, input);
-    match get_decoder(&mut rawfile) {
-      Ok(decoder) => {
-        match decoder.raw_image(&mut rawfile, params, false) {
-          Ok(rawimage) => {
-            let dev = RawDevelop::default();
-            match rawimage.clone().data {
-              RawImageData::Integer(_) => {
-                match dev.develop_intermediate(&rawimage) {
-                  Ok(image) => {
-                    let (width, height) = (rawimage.width, rawimage.height);
-                    println!("Image dimensions: {}x{}", width, height);
-                    match image.to_dynamic_image() {
-                        Some(mut dynamic_image) => {
-                            match dynamic_image.as_mut_rgb8() {
-                                Some(data)=> {
-                                    match fltk::image::RgbImage::new(
-                                    &data,
-                                    width as i32,
-                                    height as i32,
-                                    fltk::enums::ColorDepth::Rgb8) {
-                                        Ok(img) => {
-                                            match SharedImage::from_image(img) {
-                                                Ok(shared_img) => Ok(shared_img),
-                                                Err(err) => Err(format!("Error creating SharedImage: {}", err))
-                                            }
-                                        }
-                                        Err(err) => Err(format!("Processing RGBImage for \"{}\" failed: {}", image_file, err.to_string())),
-                                    }
-                                }
-                                None => Err(format!("Processing RGB for \"{}\" failed: {}", image_file, "Failed to convert to dynamic image").to_string())
-                            }
-                        },
-                        None => Err(format!("Processing DynamicImage for \"{}\" failed: {}", image_file, "Failed to convert to dynamic image").to_string())
-                    }
-                  },
-                  Err(err) => Err(format!("Processing Intermediate Image for \"{}\" failed: {}", image_file, err.to_string()))
-                }
-              },
-              RawImageData::Float(_) => todo!(),
-            }
-          },
-          Err(e) => Err(format!("Process RAW failed: {}", e.to_string())),
-        }
-      },
-      Err(e) => Err(format!("GetDecoder Failed: {}", e.to_string())),
-    }
-}
-*/
 
 fn load_image(image_file: &str) -> Result<SharedImage, String> {
     if FLTK_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
