@@ -96,7 +96,6 @@ RAW formats:
 ## TODO
 
 * Animated GIF support
-* Some camera RAWs are not displayed with correct colors
 
 ## Compiling
 
