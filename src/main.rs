@@ -4,8 +4,9 @@
     ),
     windows_subsystem = "windows"
   )]
-use fltk::{app::{self, MouseWheel}, dialog, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
-
+use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame, image::SharedImage, prelude::*, window::Window};
+use rand::Rng;
+use log;
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 use image::io::Reader as ImageReader;
 use image::GenericImageView;
@@ -45,7 +46,7 @@ fn get_absolute_path(filename: &str) -> PathBuf {
 }
 
 fn load_imagereader(image_file: &str) -> Result<SharedImage, String> {
-    println!("Processing with Imagereader: {}", image_file);
+    log::debug!("Processing with Imagereader: {}", image_file);
 
     let reader = ImageReader::open(image_file)
         .map_err(|err| format!("Don't know how to load \"{}\": {}", image_file, err))?;
@@ -55,8 +56,8 @@ fn load_imagereader(image_file: &str) -> Result<SharedImage, String> {
         .map_err(|err| format!("Decoding \"{}\" failed: {}", image_file, err))?;
 
     let (width, height) = decoded_image.dimensions();
-    println!("Image dimensions: {}x{}", width, height);
-    println!("Image color type: {:?}", decoded_image.color());
+    log::debug!("Image dimensions: {}x{}", width, height);
+    log::debug!("Image color type: {:?}", decoded_image.color());
 
     let data = decoded_image.into_rgb8().to_vec();
     let img = fltk::image::RgbImage::new(
@@ -71,7 +72,7 @@ fn load_imagereader(image_file: &str) -> Result<SharedImage, String> {
 }
 
 fn load_raw(image_file: &str) -> Result<SharedImage, String> {
-    println!("Processing as RAW: {}", image_file);
+    log::debug!("Processing as RAW: {}", image_file);
 
     let mut pipeline = imagepipe::Pipeline::new_from_file(image_file)
         .map_err(|err| format!("Don't know how to load \"{}\": {}", image_file, err))?;
@@ -175,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut current_index = 0;
     let mut image_files: Vec<PathBuf> = Vec::new();
 
-    println!("Image file: {}", image_file);
+    log::debug!("Image file: {}", image_file);
 
     let absolute_path = get_absolute_path(image_file);
     let parent_dir = absolute_path.parent().unwrap_or_else(|| {
@@ -183,7 +184,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     });
 
-    println!("Parent dir: {:?}", parent_dir);
+    log::debug!("Parent dir: {:?}", parent_dir);
 
     // Get a list of all image files in the directory
     if let Ok(entries) = fs::read_dir(parent_dir) {
@@ -216,7 +217,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     wind.handle(move |mut wind, event| {
-        use fltk::enums::Event;
         match event {
             Event::Focus => true,
             Event::MouseWheel => {
@@ -224,18 +224,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mouse_pos = (app::event_x(), app::event_y());
                 let base_zoom_speed = 0.2;
                 let mut relative_pos = (0, 0);
-                println!("Wind width/height: {}, {}", wind.width(), wind.height());
+                log::debug!("Wind width/height: {}, {}", wind.width(), wind.height());
 
                 if dy == MouseWheel::Up {
-                    println!("Zooming out");
+                    log::debug!("Zooming out");
                     zoom_factor -= base_zoom_speed * zoom_factor;
                     relative_pos = (-mouse_pos.0 + (wind.width() as f64 / 2.0) as i32, -mouse_pos.1 + (wind.height() as f64 / 2.0) as i32);
                 } else if dy == MouseWheel::Down {
-                    println!("Zooming in");
+                    log::debug!("Zooming in");
                     zoom_factor += base_zoom_speed * zoom_factor;
                     relative_pos = (mouse_pos.0 - (wind.width() as f64 / 2.0) as i32, mouse_pos.1 - (wind.height() as f64 / 2.0) as i32);
                 }
-                println!("Relative pos: {:?}", relative_pos);
+                log::debug!("Relative pos: {:?}", relative_pos);
                 if zoom_factor < 1.0 {
                     zoom_factor = 1.0; // Don't zoom out beyond the original size
                 }
@@ -244,9 +244,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let new_pos_x = frame.x() - relative_pos.0/2;
                 let new_pos_y = frame.y() - relative_pos.1/2;
 
-                println!("Zoom factor: {}", zoom_factor);
-                println!("New X/Y: {}, {}", new_pos_x, new_pos_y);
-                println!("New width/height: {}, {}", new_width, new_height);
+                log::debug!("Zoom factor: {}", zoom_factor);
+                log::debug!("New X/Y: {}, {}", new_pos_x, new_pos_y);
+                log::debug!("New width/height: {}, {}", new_width, new_height);
 
                 // Recenter image if we zoomed out all the way
                 if zoom_factor > 1.0 {
@@ -283,27 +283,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match key {
                     fltk::enums::Key::Left => {
                         current_index = (current_index + image_files.len() - 1) % image_files.len();
-                        println!("Loading previous image: {}", image_files[current_index].display());
+                        log::debug!("Loading previous image: {}", image_files[current_index].display());
                         load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
                     }
                     fltk::enums::Key::Right => {
                         current_index = (current_index + 1) % image_files.len();
-                        println!("Loading next image: {}", image_files[current_index].display());
+                        log::debug!("Loading next image: {}", image_files[current_index].display());
                         load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
                     }
                     fltk::enums::Key::Home => {
                         current_index = 0;
-                        println!("Loading first image: {}", image_files[current_index].display());
+                        log::debug!("Loading first image: {}", image_files[current_index].display());
                         load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
                     }
                     fltk::enums::Key::End => {
                         current_index = image_files.len() - 1;
-                        println!("Loading last image: {}", image_files[current_index].display());
+                        log::debug!("Loading last image: {}", image_files[current_index].display());
                         load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
                     }
                     fltk::enums::Key::Delete => {
-                        if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, "Do you want to delete this image file?", "Cancel", "Delete", "") == Some(1) {
-                            println!("Delete image: {}", image_files[current_index].display());
+                        if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, format!("Do you want to delete {}?", image_files[current_index].display()).as_str(), "Cancel", "Delete", "") == Some(1) {
+                            log::debug!("Delete image: {}", image_files[current_index].display());
                             if let Err(err) = fs::remove_file(&image_files[current_index]) {
                                 println!("Failed to delete image: {}", err);
                             } else {
@@ -316,13 +316,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         } else {
-                            println!("Delete cancelled");
+                            log::debug!("Delete cancelled");
                         };
                     }
                     fltk::enums::Key::Escape => {
                         app.quit();
                     }
-                    _ => (),
+                    _ => {
+                        if let Some(ch) = app::event_text().chars().next() {
+                            if ch.eq_ignore_ascii_case(&'R') { //Show random image
+                                current_index = rand::thread_rng().gen_range(0..image_files.len());
+                                log::debug!("Loading random image: {}", image_files[current_index].display());
+                                load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                            }
+                        }
+                    }
                 }
                 true
             }
