@@ -48,6 +48,7 @@ lightningview.exe /unregister
 | Right Cursor | Show next image in directory | 
 | Home | Jump to first image in directory |
 | End | Jump to last image in directory |
+| R | Jump to a random image in directory |
 | Delete | Delete the currently viewed image file |
 | Mouse wheel | Zoom in / out |
 | Drag Mouse | Pan image|
