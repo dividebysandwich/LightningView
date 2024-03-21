@@ -1,15 +1,15 @@
-#![cfg_attr(
+/*#![cfg_attr(
     all(
       target_os = "windows",
     ),
     windows_subsystem = "windows"
-  )]
+  )]*/
 use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame, image::SharedImage, prelude::*, window::Window};
-use rand::Rng;
-use log;
+use rand::seq::SliceRandom;
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 use image::io::Reader as ImageReader;
 use image::GenericImageView;
+use log;
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -116,6 +116,7 @@ fn load_image(image_file: &str) -> Result<SharedImage, String> {
 fn main() -> Result<(), Box<dyn Error>> {
 
     let args: Vec<String> = env::args().collect();
+    let mut image_order:Vec<usize> = Vec::new();
 
     if args.len() < 2 {
         println!("Usage: {} <image_file>", args[0]);
@@ -200,7 +201,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 )
             })
             .collect();
-        image_files.sort();
+
+        //Sort files by name, case insensitive
+        image_files.sort_by_key(|name| name.to_string_lossy().to_lowercase());
         
         // Find out where in the list our initially loaded file is, so we can navigate to the next/previous image
         if let Some(index) = image_files.iter().position(|path| path == &absolute_path) {
@@ -214,6 +217,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if image_files.is_empty() {
         println!("No images found in the directory. Exiting.");
         app.quit()
+    }
+
+    // Initialize the image_order list with a sequential index so they are browsed in-sequence
+    for (i, path) in image_files.iter().enumerate() {
+        image_order.push(i);
     }
 
     wind.handle(move |mut wind, event| {
@@ -283,36 +291,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match key {
                     fltk::enums::Key::Left => {
                         current_index = (current_index + image_files.len() - 1) % image_files.len();
-                        log::debug!("Loading previous image: {}", image_files[current_index].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                        log::debug!("Loading previous image: {}", image_files[image_order[current_index]].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::Right => {
                         current_index = (current_index + 1) % image_files.len();
-                        log::debug!("Loading next image: {}", image_files[current_index].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                        log::debug!("Loading next image: {}", image_files[image_order[current_index]].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::Home => {
                         current_index = 0;
-                        log::debug!("Loading first image: {}", image_files[current_index].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                        log::debug!("Loading first image: {}", image_files[image_order[current_index]].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::End => {
                         current_index = image_files.len() - 1;
-                        log::debug!("Loading last image: {}", image_files[current_index].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                        log::debug!("Loading last image: {}", image_files[image_order[current_index]].display());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::Delete => {
-                        if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, format!("Do you want to delete {}?", image_files[current_index].display()).as_str(), "Cancel", "Delete", "") == Some(1) {
-                            log::debug!("Delete image: {}", image_files[current_index].display());
-                            if let Err(err) = fs::remove_file(&image_files[current_index]) {
+                        if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, format!("Do you want to delete {}?", image_files[image_order[current_index]].display()).as_str(), "Cancel", "Delete", "") == Some(1) {
+                            log::debug!("Delete image: {}", image_files[image_order[current_index]].display());
+                            if let Err(err) = fs::remove_file(&image_files[image_order[current_index]]) {
                                 println!("Failed to delete image: {}", err);
                             } else {
-                                image_files.remove(current_index);
+                                image_files.remove(image_order[current_index]);
                                 if image_files.is_empty() {
                                     app.quit();
                                 } else {
                                     current_index = current_index % image_files.len();
-                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                                 }
                             }
                         } else {
@@ -324,10 +332,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     _ => {
                         if let Some(ch) = app::event_text().chars().next() {
-                            if ch.eq_ignore_ascii_case(&'R') { //Show random image
-                                current_index = rand::thread_rng().gen_range(0..image_files.len());
-                                log::debug!("Loading random image: {}", image_files[current_index].display());
-                                load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[current_index], &mut zoom_factor);
+                            if ch.eq_ignore_ascii_case(&'R') { //Randomize the sequence of images in the directory when viewing the next/prev image
+                                let original_index = image_order[current_index]; //Remember the index of the image we're currently viewing
+                                let mut rng = rand::thread_rng();
+                                image_order.shuffle(&mut rng);
+                                log::debug!("Image ordering randomized");
+                                current_index = image_order.iter().position(|&index| index == original_index).unwrap(); //Find the new index of the image we were viewing
+                            }
+                            if ch.eq_ignore_ascii_case(&'N') { // Sort images by name when viewing the next/prev image
+                                let original_index = image_order[current_index]; // Remember the index of the image we're currently viewing
+                                image_order.sort(); // Sort the image_order list to the original sequence
+                                log::debug!("Image ordering sorted by name");
+                                current_index = image_order.iter().position(|&index| index == original_index).unwrap(); //Find the new index of the image we were viewing
                             }
                         }
                     }
