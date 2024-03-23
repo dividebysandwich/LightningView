@@ -42,3 +42,5 @@ Cargo.lock
 *.webp
 *.tif
 *.tga
+*.tar.gz
+*.zip

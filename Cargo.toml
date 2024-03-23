@@ -8,6 +8,8 @@ build = "build.rs"
 const_format = "0.2.32"
 fltk ={ version = "1.4.25", features = ["fltk-bundled"] }
 image = "0.25.0"
+rand = "0.8.5"
+log = "0.4.14"
 [dependencies.imagepipe]
 version = "0.5.0"
 path = "../imagepipe"
