@@ -1,9 +1,9 @@
-/*#![cfg_attr(
+#![cfg_attr(
     all(
       target_os = "windows",
     ),
     windows_subsystem = "windows"
-  )]*/
+  )]
 use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame, image::SharedImage, prelude::*, window::Window};
 use rand::seq::SliceRandom;
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
@@ -220,7 +220,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Initialize the image_order list with a sequential index so they are browsed in-sequence
-    for (i, path) in image_files.iter().enumerate() {
+    for (i, _path) in image_files.iter().enumerate() {
         image_order.push(i);
     }
 
