@@ -1,9 +1,9 @@
-#![cfg_attr(
-    all(
-      target_os = "windows",
-    ),
-    windows_subsystem = "windows"
-  )]
+//#![cfg_attr(
+//    all(
+//      target_os = "windows",
+//    ),
+//    windows_subsystem = "windows"
+//  )]
 use fltk::{app::{self, MouseWheel}, dialog, enums::Color, frame::Frame, image::SharedImage, prelude::*, window::Window};
 
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
