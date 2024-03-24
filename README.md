@@ -29,7 +29,7 @@ To start viewing images:
 lightningview.exe <imagefile.ext>
 ```
 
-To register as valid default program for viewing images on Windows:
+To register as default program for viewing images on older versions of Windows:
 ```
 lightningview.exe /register
 ```
@@ -95,9 +95,11 @@ RAW formats:
 * Canon CR2
 * ARRI's ARI
 
-## TODO
+## TODO / Feature Requests
 
-* Animated GIF support
+* Add a way to edit the currently viewed file
+* Display sorting mode on screen when pressing R or N
+* OpenCL support for RAW processing
 
 ## Compiling
 

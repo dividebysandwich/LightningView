@@ -4,7 +4,7 @@
     ),
     windows_subsystem = "windows"
   )]
-use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame, image::SharedImage, prelude::*, window::Window};
+use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame, image::{AnimGifImage, AnimGifImageFlags, SharedImage}, prelude::*, window::Window};
 use rand::seq::SliceRandom;
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 use image::io::Reader as ImageReader;
@@ -17,18 +17,38 @@ mod windows;
 use crate::windows::*;
 
 pub const IMAGEREADER_SUPPORTED_FORMATS: [&str; 4] = ["webp", "tif", "tiff", "tga"];
-pub const FLTK_SUPPORTED_FORMATS: [&str; 10] = ["jpg", "jpeg", "png", "bmp", "gif", "svg", "ico", "pnm", "xbm", "xpm"];
+pub const ANIM_SUPPORTED_FORMATS: [&str; 1] = ["gif"];
+pub const FLTK_SUPPORTED_FORMATS: [&str; 9] = ["jpg", "jpeg", "png", "bmp", "svg", "ico", "pnm", "xbm", "xpm"];
 pub const RAW_SUPPORTED_FORMATS: [&str; 23] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
 
 
-fn load_and_display_image(original_image: &mut SharedImage, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64) {
-    if let Ok(image) = load_image(&path.to_string_lossy()) {
-        let mut new_image = image.clone();
-        new_image.scale(wind.width(), wind.height(), true, true);
-        frame.set_image(Some(new_image));
-        *zoom_factor = 1.0;
+// Enum to hold the image type, either a shared image or an animated gif
+#[derive(Clone)]
+enum ImageType {
+    Shared(SharedImage),
+    AnimatedGif(AnimGifImage),
+}
+
+fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64, screen_width: i32, screen_height: i32) {
+    if let Ok(image) = load_image(&path.to_string_lossy(), wind) {
+        wind.set_size(screen_width, screen_height); // Setting the size again is needed because fltk may try to resize it when displaying an animated gif
+        wind.fullscreen(true);
         frame.set_pos(0, 0);
+        let cloned_image = image.clone();
+        match cloned_image {
+            ImageType::Shared(img) => {
+                let mut new_image = img.clone();
+                new_image.scale(wind.width(), wind.height(), true, true);
+                frame.set_image(Some(new_image));
+            },
+            ImageType::AnimatedGif(mut anim_img) => {
+                anim_img.scale(wind.width(), wind.height(), true, true);
+                frame.set_image(Some(anim_img.clone()));
+            }
+        }
         wind.redraw();
+
+        *zoom_factor = 1.0;
         *original_image = image;
     }
 }
@@ -92,20 +112,36 @@ fn load_raw(image_file: &str) -> Result<SharedImage, String> {
     SharedImage::from_image(img).map_err(|err| format!("Error creating image: {}", err))
 }
 
-fn load_image(image_file: &str) -> Result<SharedImage, String> {
+fn load_animated_image(image_file: &str, widget: &mut Window) -> Result<AnimGifImage, String> {
+    log::debug!("Processing as animated image: {}", image_file);
+    let anim_image = AnimGifImage::load(image_file, widget, AnimGifImageFlags::None)
+        .map_err(|err| format!("Error loading animated image: {}", err))?;
+
+    Ok(anim_image)
+}
+    
+
+fn load_image(image_file: &str, widget: &mut Window) -> Result<ImageType, String> {
     if FLTK_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match SharedImage::load(image_file) {
-            Ok(image) => Ok(image),
+            Ok(image) => Ok(ImageType::Shared(image)),
             Err(err) => Err(format!("Error loading image: {}", err)),
+        }
+    } else if ANIM_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
+        match load_animated_image(image_file, widget) {
+            Ok(image) => {
+                Ok(ImageType::AnimatedGif(image))
+            },
+            Err(err) => Err(format!("Error loading RAW image: {}", err)),
         }
     } else if RAW_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match load_raw(image_file) {
-            Ok(image) => Ok(image),
+            Ok(image) => Ok(ImageType::Shared(image)),
             Err(err) => Err(format!("Error loading RAW image: {}", err)),
         }
     } else if IMAGEREADER_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match load_imagereader(image_file) {
-            Ok(image) => Ok(image),
+            Ok(image) => Ok(ImageType::Shared(image)),
             Err(err) => Err(format!("Error loading Imagereader image: {}", err)),
         }
     } else {
@@ -114,6 +150,8 @@ fn load_image(image_file: &str) -> Result<SharedImage, String> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+//    std::env::set_var("RUST_LOG", "debug");
+    env_logger::init();
 
     let args: Vec<String> = env::args().collect();
     let mut image_order:Vec<usize> = Vec::new();
@@ -145,8 +183,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         } 
     }
 
+    // Create an empty mutable image to be able to modify it later
+    let empty_img = fltk::image::RgbImage::new(&[0; 4], 1, 1, fltk::enums::ColorDepth::Rgb8).unwrap();
+    let mut original_image = ImageType::Shared(SharedImage::from_image(empty_img).unwrap());
+
     let app = app::App::default();
 
+    let mut zoom_factor = 1.0;
+    let mut pan_origin: Option<(i32, i32)> = None;
+    let mut current_index = 0;
+    let mut image_files: Vec<PathBuf> = Vec::new();
+    
     // Get the screen size
     let screen = app::screen_count(); // Get the number of screens
     let (screen_width, screen_height) = if screen > 0 {
@@ -155,27 +202,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         (800, 600) // Default dimensions
     };
-
-    let mut wind = Window::new(0, 0, screen_width, screen_height, "Lightning View");
-    wind.set_color(Color::Black);
-    wind.fullscreen(true);
-    let mut frame = Frame::default_fill();
-
-    let mut original_image = load_image(image_file)?;
-    let mut image = original_image.clone();
-    image.scale(wind.width(), wind.height(), true, true);
-
-    frame.set_image(Some(image));
-
-    wind.end();
-    wind.make_resizable(true);
-    wind.show();
-
-    // Add mouse wheel event handling for zooming
-    let mut zoom_factor = 1.0;
-    let mut pan_origin: Option<(i32, i32)> = None;
-    let mut current_index = 0;
-    let mut image_files: Vec<PathBuf> = Vec::new();
 
     log::debug!("Image file: {}", image_file);
 
@@ -191,6 +217,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(entries) = fs::read_dir(parent_dir) {
         let mut all_supported_formats: Vec<&str> = Vec::new();
         all_supported_formats.extend(&IMAGEREADER_SUPPORTED_FORMATS);
+        all_supported_formats.extend(&ANIM_SUPPORTED_FORMATS);
         all_supported_formats.extend(&FLTK_SUPPORTED_FORMATS);
         all_supported_formats.extend(&RAW_SUPPORTED_FORMATS);
         image_files = entries
@@ -224,6 +251,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         image_order.push(i);
     }
 
+    let mut wind = Window::new(0, 0, screen_width, screen_height, "Lightning View");
+    wind.set_color(Color::Black);
+    wind.fullscreen(true);
+    let mut frame = Frame::default_fill();
+    wind.end(); // Finish adding UI components to the window
+
+    // Load and display the initial image
+    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
+
+    wind.make_resizable(true);
+    wind.show();
+
+
     wind.handle(move |mut wind, event| {
         match event {
             Event::Focus => true,
@@ -247,14 +287,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if zoom_factor < 1.0 {
                     zoom_factor = 1.0; // Don't zoom out beyond the original size
                 }
-                let new_width = (original_image.width() as f64 * zoom_factor) as i32;
-                let new_height = (original_image.height() as f64 * zoom_factor) as i32;
+
+                match &original_image {
+                    ImageType::Shared(img) => {
+                        let new_image = img.clone();
+                        let new_width = (new_image.width() as f64 * zoom_factor) as i32;
+                        let new_height = (new_image.height() as f64 * zoom_factor) as i32;
+                        log::debug!("New width/height: {}, {}", new_width, new_height);
+                        frame.set_image(Some(new_image.copy_sized(new_width, new_height)));
+                    },
+                    ImageType::AnimatedGif(anim_img) => {
+                        let new_image = anim_img.clone();
+                        let new_width = (new_image.width() as f64 * zoom_factor) as i32;
+                        let new_height = (new_image.height() as f64 * zoom_factor) as i32;
+                        log::debug!("New width/height: {}, {}", new_width, new_height);
+                        frame.set_image(Some(new_image.copy_sized(new_width, new_height)));
+                    }
+                
+                }
+
                 let new_pos_x = frame.x() - relative_pos.0/2;
                 let new_pos_y = frame.y() - relative_pos.1/2;
-
-                log::debug!("Zoom factor: {}", zoom_factor);
-                log::debug!("New X/Y: {}, {}", new_pos_x, new_pos_y);
-                log::debug!("New width/height: {}, {}", new_width, new_height);
 
                 // Recenter image if we zoomed out all the way
                 if zoom_factor > 1.0 {
@@ -263,7 +316,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     frame.set_pos(0, 0);
                 }
 
-                frame.set_image(Some(original_image.copy_sized(new_width, new_height)));
+                log::debug!("Zoom factor: {}", zoom_factor);
+                log::debug!("New X/Y: {}, {}", new_pos_x, new_pos_y);
+
                 wind.redraw(); 
                 true
             }
@@ -292,22 +347,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     fltk::enums::Key::Left => {
                         current_index = (current_index + image_files.len() - 1) % image_files.len();
                         log::debug!("Loading previous image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
                     }
                     fltk::enums::Key::Right => {
                         current_index = (current_index + 1) % image_files.len();
                         log::debug!("Loading next image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
                     }
                     fltk::enums::Key::Home => {
                         current_index = 0;
                         log::debug!("Loading first image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
                     }
                     fltk::enums::Key::End => {
                         current_index = image_files.len() - 1;
                         log::debug!("Loading last image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
                     }
                     fltk::enums::Key::Delete => {
                         if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, format!("Do you want to delete {}?", image_files[image_order[current_index]].display()).as_str(), "Cancel", "Delete", "") == Some(1) {
@@ -320,7 +375,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     app.quit();
                                 } else {
                                     current_index = current_index % image_files.len();
-                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
                                 }
                             }
                         } else {
