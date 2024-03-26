@@ -5,6 +5,7 @@
     windows_subsystem = "windows"
   )]
 use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame, image::{AnimGifImage, AnimGifImageFlags, SharedImage}, prelude::*, window::Window};
+use arboard::{Clipboard, ImageData};
 use rand::seq::SliceRandom;
 use std::{env, error::Error, fs, path::{Path, PathBuf}};
 use image::io::Reader as ImageReader;
@@ -21,6 +22,7 @@ pub const ANIM_SUPPORTED_FORMATS: [&str; 1] = ["gif"];
 pub const FLTK_SUPPORTED_FORMATS: [&str; 9] = ["jpg", "jpeg", "png", "bmp", "svg", "ico", "pnm", "xbm", "xpm"];
 pub const RAW_SUPPORTED_FORMATS: [&str; 23] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
 
+const KEY_C : fltk::enums::Key = fltk::enums::Key::from_char('c');
 
 // Enum to hold the image type, either a shared image or an animated gif
 #[derive(Clone)]
@@ -29,10 +31,8 @@ enum ImageType {
     AnimatedGif(AnimGifImage),
 }
 
-fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64, screen_width: i32, screen_height: i32) {
+fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64) {
     if let Ok(image) = load_image(&path.to_string_lossy(), wind) {
-        wind.set_size(screen_width, screen_height); // Setting the size again is needed because fltk may try to resize it when displaying an animated gif
-        wind.fullscreen(true);
         frame.set_pos(0, 0);
         let cloned_image = image.clone();
         match cloned_image {
@@ -47,6 +47,7 @@ fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, win
             }
         }
         wind.redraw();
+        wind.fullscreen(true);
 
         *zoom_factor = 1.0;
         *original_image = image;
@@ -114,12 +115,11 @@ fn load_raw(image_file: &str) -> Result<SharedImage, String> {
 
 fn load_animated_image(image_file: &str, widget: &mut Window) -> Result<AnimGifImage, String> {
     log::debug!("Processing as animated image: {}", image_file);
-    let anim_image = AnimGifImage::load(image_file, widget, AnimGifImageFlags::None)
+    let anim_image = AnimGifImage::load(image_file, widget, AnimGifImageFlags::DONT_RESIZE_CANVAS)
         .map_err(|err| format!("Error loading animated image: {}", err))?;
 
     Ok(anim_image)
 }
-    
 
 fn load_image(image_file: &str, widget: &mut Window) -> Result<ImageType, String> {
     if FLTK_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
@@ -155,6 +155,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let args: Vec<String> = env::args().collect();
     let mut image_order:Vec<usize> = Vec::new();
+    let mut clipboard: Clipboard = Clipboard::new().unwrap();
 
     if args.len() < 2 {
         println!("Usage: {} <image_file>", args[0]);
@@ -252,21 +253,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut wind = Window::new(0, 0, screen_width, screen_height, "Lightning View");
+    wind.make_resizable(true);
     wind.set_color(Color::Black);
     wind.fullscreen(true);
     let mut frame = Frame::default_fill();
     wind.end(); // Finish adding UI components to the window
 
     // Load and display the initial image
-    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
+    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
 
-    wind.make_resizable(true);
     wind.show();
 
 
     wind.handle(move |mut wind, event| {
         match event {
             Event::Focus => true,
+            Event::Leave => true,
             Event::MouseWheel => {
                 let dy = app::event_dy();
                 let mouse_pos = (app::event_x(), app::event_y());
@@ -340,6 +342,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Event::KeyDown => {
                 let key = app::event_key();
+
                 if image_files.is_empty() {                            
                     app.quit();
                 }
@@ -347,22 +350,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     fltk::enums::Key::Left => {
                         current_index = (current_index + image_files.len() - 1) % image_files.len();
                         log::debug!("Loading previous image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::Right => {
                         current_index = (current_index + 1) % image_files.len();
                         log::debug!("Loading next image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::Home => {
                         current_index = 0;
                         log::debug!("Loading first image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::End => {
                         current_index = image_files.len() - 1;
                         log::debug!("Loading last image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                     }
                     fltk::enums::Key::Delete => {
                         if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, format!("Do you want to delete {}?", image_files[image_order[current_index]].display()).as_str(), "Cancel", "Delete", "") == Some(1) {
@@ -375,7 +378,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     app.quit();
                                 } else {
                                     current_index = current_index % image_files.len();
-                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, screen_width, screen_height);
+                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
                                 }
                             }
                         } else {
@@ -385,8 +388,79 @@ fn main() -> Result<(), Box<dyn Error>> {
                     fltk::enums::Key::Escape => {
                         app.quit();
                     }
+                    KEY_C => {
+                        let eventstate = app::event_state();
+                        //Check if the Control key was held down when the 'C' key was pressed
+                        if eventstate.contains(fltk::enums::Shortcut::Ctrl) {
+                            log::debug!("Copy image to clipboard");
+                            match &original_image {
+                                ImageType::Shared(img) => {
+                                    match img.depth() {
+                                        fltk::enums::ColorDepth::Rgba8 => {
+                                            let rgba_image = img.to_rgb();
+                                            match rgba_image {
+                                                Ok(rgba_img) => {
+                                                    let rgb_data = rgba_img.to_rgb_data();
+                                                    let img_data: ImageData = ImageData {
+                                                        bytes: rgb_data.into(),
+                                                        width: img.data_w() as usize,
+                                                        height: img.data_h() as usize,
+                                                    };
+                                                    let _ = clipboard.set_image(img_data);
+                                                    log::debug!("Image copied to clipboard");
+                                                },
+                                                Err(err) => {
+                                                    log::error!("Failed to convert image to RGB: {}", err);
+                                                }
+                                            }
+                                        },
+                                        fltk::enums::ColorDepth::Rgb8 => {
+                                            let rgb_image = img.to_rgb();
+                                            match rgb_image {
+                                                Ok(rgb_img) => {
+                                                    let rgba_image = rgb_img.convert(fltk::enums::ColorDepth::Rgba8);
+                                                    match rgba_image {
+                                                        Ok(rgba_img) => {
+                                                            let rgba_data = rgba_img.to_rgb_data();
+                                                            log::debug!("rgba image size: {}", rgba_data.len());
+                                                            let img_data: ImageData = ImageData {
+                                                                bytes: rgba_data.into(),
+                                                                width: img.data_w() as usize,
+                                                                height: img.data_h() as usize,
+                                                            };
+                                                            let _ = clipboard.set_image(img_data);
+                                                            log::debug!("Image copied to clipboard");
+                                                        },
+                                                        Err(err) => {
+                                                            log::error!("Failed to convert image to RGBA: {}", err);
+                                                        }
+                                                    }
+
+                                                }
+                                                Err(err) => {
+                                                    log::error!("Failed to convert image to RGB: {}", err);
+                                                }
+                                            }
+                                        },
+                                        _ => {
+                                            log::error!("Unsupported color depth");
+                                        }
+                                    }
+                                },
+                                ImageType::AnimatedGif(_anim_img) => {
+                                    log::error!("Copying animated images to clipboard is not supported");
+                                }
+                            }                            
+                        }
+                        return true;
+                    }
                     _ => {
                         if let Some(ch) = app::event_text().chars().next() {
+                            if ch.eq_ignore_ascii_case(&'F') {
+                                //Toggle fullscreen
+                                wind.make_resizable(true);
+                                wind.fullscreen(!wind.fullscreen_active());
+                            }
                             if ch.eq_ignore_ascii_case(&'R') { //Randomize the sequence of images in the directory when viewing the next/prev image
                                 let original_index = image_order[current_index]; //Remember the index of the image we're currently viewing
                                 let mut rng = rand::thread_rng();

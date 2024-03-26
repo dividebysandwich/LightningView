@@ -50,6 +50,7 @@ lightningview.exe /unregister
 | End | Jump to last image in directory |
 | R | Sort images randomly |
 | N | Sort images by name |
+| F | Toggle fullscreen |
 | Delete | Delete the currently viewed image file |
 | Mouse wheel | Zoom in / out |
 | Drag Mouse | Pan image|
