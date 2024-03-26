@@ -149,6 +149,51 @@ fn load_image(image_file: &str, widget: &mut Window) -> Result<ImageType, String
     }
 }
 
+fn copy_to_clipboard(original_image: &mut ImageType, clipboard: &mut Clipboard) -> Result<(), String> {
+    match &original_image {
+        ImageType::Shared(img) => {
+            match img.depth() {
+                fltk::enums::ColorDepth::Rgba8 => {
+                    let rgba_image = img.to_rgb()
+                        .map_err(|err| format!("Error converting SharedImage to RGB: {}", err))?;
+                    let rgb_data = rgba_image.to_rgb_data();
+                    let img_data: ImageData = ImageData {
+                        bytes: rgb_data.into(),
+                        width: img.data_w() as usize,
+                        height: img.data_h() as usize,
+                    };
+                    let _ = clipboard.set_image(img_data);
+                    log::debug!("Image copied to clipboard");
+                    Ok(())
+                },
+                fltk::enums::ColorDepth::Rgb8 => {
+                    let rgb_image = img.to_rgb()
+                        .map_err(|err| format!("Error converting SharedImage to RGB: {}", err))?;
+                    let rgba_image = rgb_image.convert(fltk::enums::ColorDepth::Rgba8)
+                        .map_err(|err| format!("Error converting RGB to RGBA: {}", err))?;
+                    let rgba_data = rgba_image.to_rgb_data();
+                    log::debug!("rgba image size: {}", rgba_data.len());
+                    let img_data: ImageData = ImageData {
+                        bytes: rgba_data.into(),
+                        width: img.data_w() as usize,
+                                height: img.data_h() as usize,
+                    };
+                    let _ = clipboard.set_image(img_data);
+                    log::debug!("Image copied to clipboard");
+                    Ok(())
+                },
+                _ => {
+                    Err(format!("Unsupported color depth: {:?}", img.depth()))
+                }
+            }
+        },
+        ImageType::AnimatedGif(_anim_img) => {
+            Err(format!("Copying animated images to clipboard is not supported"))
+        }
+    }
+}
+
+
 fn main() -> Result<(), Box<dyn Error>> {
 //    std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
@@ -393,64 +438,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         //Check if the Control key was held down when the 'C' key was pressed
                         if eventstate.contains(fltk::enums::Shortcut::Ctrl) {
                             log::debug!("Copy image to clipboard");
-                            match &original_image {
-                                ImageType::Shared(img) => {
-                                    match img.depth() {
-                                        fltk::enums::ColorDepth::Rgba8 => {
-                                            let rgba_image = img.to_rgb();
-                                            match rgba_image {
-                                                Ok(rgba_img) => {
-                                                    let rgb_data = rgba_img.to_rgb_data();
-                                                    let img_data: ImageData = ImageData {
-                                                        bytes: rgb_data.into(),
-                                                        width: img.data_w() as usize,
-                                                        height: img.data_h() as usize,
-                                                    };
-                                                    let _ = clipboard.set_image(img_data);
-                                                    log::debug!("Image copied to clipboard");
-                                                },
-                                                Err(err) => {
-                                                    log::error!("Failed to convert image to RGB: {}", err);
-                                                }
-                                            }
-                                        },
-                                        fltk::enums::ColorDepth::Rgb8 => {
-                                            let rgb_image = img.to_rgb();
-                                            match rgb_image {
-                                                Ok(rgb_img) => {
-                                                    let rgba_image = rgb_img.convert(fltk::enums::ColorDepth::Rgba8);
-                                                    match rgba_image {
-                                                        Ok(rgba_img) => {
-                                                            let rgba_data = rgba_img.to_rgb_data();
-                                                            log::debug!("rgba image size: {}", rgba_data.len());
-                                                            let img_data: ImageData = ImageData {
-                                                                bytes: rgba_data.into(),
-                                                                width: img.data_w() as usize,
-                                                                height: img.data_h() as usize,
-                                                            };
-                                                            let _ = clipboard.set_image(img_data);
-                                                            log::debug!("Image copied to clipboard");
-                                                        },
-                                                        Err(err) => {
-                                                            log::error!("Failed to convert image to RGBA: {}", err);
-                                                        }
-                                                    }
-
-                                                }
-                                                Err(err) => {
-                                                    log::error!("Failed to convert image to RGB: {}", err);
-                                                }
-                                            }
-                                        },
-                                        _ => {
-                                            log::error!("Unsupported color depth");
-                                        }
-                                    }
+                            match copy_to_clipboard(&mut original_image, &mut clipboard) {
+                                Ok(_) => {
+                                    log::debug!("Image copied to clipboard");
                                 },
-                                ImageType::AnimatedGif(_anim_img) => {
-                                    log::error!("Copying animated images to clipboard is not supported");
+                                Err(err) => {
+                                    log::error!("Failed to copy image to clipboard: {}", err);
                                 }
-                            }                            
+                            
+                            }
                         }
                         return true;
                     }
