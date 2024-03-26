@@ -52,6 +52,7 @@ lightningview.exe /unregister
 | N | Sort images by name |
 | F | Toggle fullscreen |
 | Delete | Delete the currently viewed image file |
+| Ctrl+C | Copy current image to clipboard |
 | Mouse wheel | Zoom in / out |
 | Drag Mouse | Pan image|
 
