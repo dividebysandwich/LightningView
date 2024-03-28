@@ -132,7 +132,7 @@ fn load_image(image_file: &str, widget: &mut Window) -> Result<ImageType, String
             Ok(image) => {
                 Ok(ImageType::AnimatedGif(image))
             },
-            Err(err) => Err(format!("Error loading RAW image: {}", err)),
+            Err(err) => Err(format!("Error loading animated GIF image: {}", err)),
         }
     } else if RAW_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match load_raw(image_file) {
@@ -234,6 +234,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut original_image = ImageType::Shared(SharedImage::from_image(empty_img).unwrap());
 
     let app = app::App::default();
+
+    // Enable bilinear filtering for scaling operations
+    fltk::image::RgbImage::set_scaling_algorithm(fltk::image::RgbScaling::Bilinear);
 
     let mut zoom_factor = 1.0;
     let mut pan_origin: Option<(i32, i32)> = None;
