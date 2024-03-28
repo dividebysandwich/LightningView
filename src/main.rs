@@ -31,7 +31,7 @@ enum ImageType {
     AnimatedGif(AnimGifImage),
 }
 
-fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64) {
+fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64, is_fullscreen: bool) {
     if let Ok(image) = load_image(&path.to_string_lossy(), wind) {
         frame.set_pos(0, 0);
         let cloned_image = image.clone();
@@ -47,7 +47,7 @@ fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, win
             }
         }
         wind.redraw();
-        wind.fullscreen(true);
+        wind.fullscreen(is_fullscreen);
 
         *zoom_factor = 1.0;
         *original_image = image;
@@ -199,6 +199,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     let args: Vec<String> = env::args().collect();
+    let mut is_fullscreen = true;
     let mut image_order:Vec<usize> = Vec::new();
     let mut clipboard: Clipboard = Clipboard::new().unwrap();
 
@@ -303,12 +304,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut wind = Window::new(0, 0, screen_width, screen_height, "Lightning View");
     wind.make_resizable(true);
     wind.set_color(Color::Black);
-    wind.fullscreen(true);
+    wind.fullscreen(is_fullscreen);
     let mut frame = Frame::default_fill();
     wind.end(); // Finish adding UI components to the window
 
     // Load and display the initial image
-    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
 
     wind.show();
 
@@ -398,22 +399,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     fltk::enums::Key::Left => {
                         current_index = (current_index + image_files.len() - 1) % image_files.len();
                         log::debug!("Loading previous image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
                     }
                     fltk::enums::Key::Right => {
                         current_index = (current_index + 1) % image_files.len();
                         log::debug!("Loading next image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
                     }
                     fltk::enums::Key::Home => {
                         current_index = 0;
                         log::debug!("Loading first image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
                     }
                     fltk::enums::Key::End => {
                         current_index = image_files.len() - 1;
                         log::debug!("Loading last image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
                     }
                     fltk::enums::Key::Delete => {
                         if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, format!("Do you want to delete {}?", image_files[image_order[current_index]].display()).as_str(), "Cancel", "Delete", "") == Some(1) {
@@ -426,7 +427,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     app.quit();
                                 } else {
                                     current_index = current_index % image_files.len();
-                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor);
+                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
                                 }
                             }
                         } else {
@@ -458,7 +459,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                             if ch.eq_ignore_ascii_case(&'F') {
                                 //Toggle fullscreen
                                 wind.make_resizable(true);
-                                wind.fullscreen(!wind.fullscreen_active());
+                                is_fullscreen = !is_fullscreen;
+                                wind.fullscreen(is_fullscreen);
                             }
                             if ch.eq_ignore_ascii_case(&'R') { //Randomize the sequence of images in the directory when viewing the next/prev image
                                 let original_index = image_order[current_index]; //Remember the index of the image we're currently viewing
