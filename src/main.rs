@@ -203,7 +203,7 @@ fn copy_to_clipboard(original_image: &mut ImageType, clipboard: &mut Clipboard) 
 
 
 fn main() -> Result<(), Box<dyn Error>> {
-    std::env::set_var("RUST_LOG", "debug");
+//    std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     let args: Vec<String> = env::args().collect();
