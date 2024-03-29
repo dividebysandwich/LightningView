@@ -51,6 +51,7 @@ lightningview.exe /unregister
 | R | Sort images randomly |
 | N | Sort images by name |
 | F | Toggle fullscreen |
+| Enter | Toggle between scale to fit and 1:1 display |
 | Delete | Delete the currently viewed image file |
 | Ctrl+C | Copy current image to clipboard |
 | Mouse wheel | Zoom in / out |

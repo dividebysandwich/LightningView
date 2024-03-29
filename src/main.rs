@@ -31,18 +31,26 @@ enum ImageType {
     AnimatedGif(AnimGifImage),
 }
 
-fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64, is_fullscreen: bool) {
+fn load_and_display_image(original_image: &mut ImageType, frame: &mut Frame, wind: &mut Window, path: &PathBuf, zoom_factor: &mut f64, is_fullscreen: bool, is_scaled_to_fit: bool) {
     if let Ok(image) = load_image(&path.to_string_lossy(), wind) {
         frame.set_pos(0, 0);
         let cloned_image = image.clone();
         match cloned_image {
             ImageType::Shared(img) => {
                 let mut new_image = img.clone();
-                new_image.scale(wind.width(), wind.height(), true, true);
+                if is_scaled_to_fit {
+                    new_image.scale(wind.width(), wind.height(), true, true);
+                } else {
+                    new_image.scale(new_image.data_w(), new_image.data_h(), true, true);
+                }
                 frame.set_image(Some(new_image));
             },
             ImageType::AnimatedGif(mut anim_img) => {
-                anim_img.scale(wind.width(), wind.height(), true, true);
+                if is_scaled_to_fit {
+                    anim_img.scale(wind.width(), wind.height(), true, true);
+                } else {
+                    anim_img.scale(anim_img.data_w(), anim_img.data_h(), true, true);
+                }
                 frame.set_image(Some(anim_img.clone()));
             }
         }
@@ -195,11 +203,12 @@ fn copy_to_clipboard(original_image: &mut ImageType, clipboard: &mut Clipboard) 
 
 
 fn main() -> Result<(), Box<dyn Error>> {
-//    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     let args: Vec<String> = env::args().collect();
     let mut is_fullscreen = true;
+    let mut is_scaled_to_fit = true; // Whether to start with the image zoomed in to fit the screen
     let mut image_order:Vec<usize> = Vec::new();
     let mut clipboard: Clipboard = Clipboard::new().unwrap();
 
@@ -309,7 +318,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     wind.end(); // Finish adding UI components to the window
 
     // Load and display the initial image
-    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
+    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen,is_scaled_to_fit);
 
     wind.show();
 
@@ -399,22 +408,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                     fltk::enums::Key::Left => {
                         current_index = (current_index + image_files.len() - 1) % image_files.len();
                         log::debug!("Loading previous image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen, is_scaled_to_fit);
                     }
                     fltk::enums::Key::Right => {
                         current_index = (current_index + 1) % image_files.len();
                         log::debug!("Loading next image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen, is_scaled_to_fit);
                     }
                     fltk::enums::Key::Home => {
                         current_index = 0;
                         log::debug!("Loading first image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen, is_scaled_to_fit);
                     }
                     fltk::enums::Key::End => {
                         current_index = image_files.len() - 1;
                         log::debug!("Loading last image: {}", image_files[image_order[current_index]].display());
-                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen, is_scaled_to_fit);
+                    }
+                    fltk::enums::Key::Enter => {
+                        is_scaled_to_fit = !is_scaled_to_fit;
+                        log::debug!("{}", format!("Toggling image scaling to fit the screen: {}", is_scaled_to_fit).as_str());
+                        load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen, is_scaled_to_fit);
                     }
                     fltk::enums::Key::Delete => {
                         if dialog::choice2(wind.width()/2 - 200, wind.height()/2 - 100, format!("Do you want to delete {}?", image_files[image_order[current_index]].display()).as_str(), "Cancel", "Delete", "") == Some(1) {
@@ -427,7 +441,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     app.quit();
                                 } else {
                                     current_index = current_index % image_files.len();
-                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen);
+                                    load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen, is_scaled_to_fit);
                                 }
                             }
                         } else {
