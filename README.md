@@ -90,7 +90,7 @@ RAW formats:
 * Adobe DNG
 * Pentax PEF
 * Canon CRW
-* Leaf IIQ
+* Leaf / Phase One IIQ
 * Hasselblad 3FR
 * Nikon NRW
 * Nikon NEF
