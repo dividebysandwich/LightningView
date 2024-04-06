@@ -201,6 +201,27 @@ fn copy_to_clipboard(original_image: &mut ImageType, clipboard: &mut Clipboard) 
     }
 }
 
+fn order_by_name(image_order: &mut Vec<usize>, current_index: &mut usize, is_randomized: &mut bool) {
+    let original_index = image_order[*current_index];
+    // Remember the index of the image we're currently viewing
+    image_order.sort();
+    // Sort the image_order list to the original sequence
+    log::debug!("Image ordering sorted by name");
+    *is_randomized = false;
+    *current_index = image_order.iter().position(|&index| index == original_index).unwrap();
+    //Find the new index of the image we were viewing
+}
+
+fn order_random(image_order: &mut Vec<usize>, current_index: &mut usize, is_randomized: &mut bool) {
+    let original_index = image_order[*current_index];
+    //Remember the index of the image we're currently viewing
+    let mut rng = rand::thread_rng();
+    image_order.shuffle(&mut rng);
+    log::debug!("Image ordering randomized");
+    *is_randomized = true;
+    *current_index = image_order.iter().position(|&index| index == original_index).unwrap();
+    //Find the new index of the image we were viewing
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
 //    std::env::set_var("RUST_LOG", "debug");
@@ -208,6 +229,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let args: Vec<String> = env::args().collect();
     let mut is_fullscreen = true;
+    let mut is_randomized = false; // Whether to start with the images in random order
     let mut is_scaled_to_fit = true; // Whether to start with the image zoomed in to fit the screen
     let mut image_order:Vec<usize> = Vec::new();
     let mut clipboard: Clipboard = Clipboard::new().unwrap();
@@ -383,7 +405,51 @@ fn main() -> Result<(), Box<dyn Error>> {
                 true
             }
             Event::Push => {
-                pan_origin = Some((app::event_x(), app::event_y()));
+                if app::event_mouse_button() == app::MouseButton::Left {
+                    pan_origin = Some((app::event_x(), app::event_y()));
+                } else if app::event_mouse_button() == app::MouseButton::Right {
+                    let coords = app::event_coords();
+                    log::debug!("coords: {:?}", coords);
+                    let mut checkbox_scale_to_fit = "☐ Scale to fit";
+                    if is_scaled_to_fit {
+                        checkbox_scale_to_fit = "☑ Scale to fit";
+                    }
+                    let mut checkbox_fullscreen = "☐ Fullscreen";
+                    if is_fullscreen {
+                        checkbox_fullscreen = "☑ Fullscreen";
+                    }
+                    let mut checkbox_randomize = "☐ Random order";
+                    if is_randomized {
+                        checkbox_randomize = "☑ Random order";
+                    }
+                    let popup_menu = fltk::menu::MenuItem::new(&[checkbox_fullscreen, checkbox_scale_to_fit, checkbox_randomize]);
+                    match popup_menu.popup(coords.0, coords.1) {
+                        None => log::debug!("No menu item selected."),
+                        Some(val) => {
+                            let label = val.label().unwrap_or_default();
+                            // If label ends with "Scale to fit", toggle scaling to fit
+                            if label.ends_with("Scale to fit") {
+                                is_scaled_to_fit = !is_scaled_to_fit;
+                                log::debug!("{}", format!("Toggling image scaling to fit the screen: {}", is_scaled_to_fit).as_str());
+                                load_and_display_image(&mut original_image, &mut frame, &mut wind, &image_files[image_order[current_index]], &mut zoom_factor, is_fullscreen, is_scaled_to_fit);
+                            }
+                            // If label ends with "Fullscreen", toggle fullscreen
+                            else if label.ends_with("Fullscreen") {
+                                is_fullscreen = !is_fullscreen;
+                                wind.fullscreen(is_fullscreen);
+                                log::debug!("{}", format!("Toggling fullscreen: {}", is_fullscreen).as_str());
+                            }
+                            else if label.ends_with("Random order") {
+                                if is_randomized {
+                                    order_by_name(&mut image_order, &mut current_index, &mut is_randomized);
+                                } else {
+                                    order_random(&mut image_order, &mut current_index, &mut is_randomized);
+                                }
+                            }
+                            log::debug!("Menu item selected: {:?}", val.label());
+                        }
+                    }
+                }
                 true
             }
             Event::Drag => {
@@ -477,17 +543,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 wind.fullscreen(is_fullscreen);
                             }
                             if ch.eq_ignore_ascii_case(&'R') { //Randomize the sequence of images in the directory when viewing the next/prev image
-                                let original_index = image_order[current_index]; //Remember the index of the image we're currently viewing
-                                let mut rng = rand::thread_rng();
-                                image_order.shuffle(&mut rng);
-                                log::debug!("Image ordering randomized");
-                                current_index = image_order.iter().position(|&index| index == original_index).unwrap(); //Find the new index of the image we were viewing
+                                order_random(&mut image_order, &mut current_index, &mut is_randomized);
                             }
                             if ch.eq_ignore_ascii_case(&'N') { // Sort images by name when viewing the next/prev image
-                                let original_index = image_order[current_index]; // Remember the index of the image we're currently viewing
-                                image_order.sort(); // Sort the image_order list to the original sequence
-                                log::debug!("Image ordering sorted by name");
-                                current_index = image_order.iter().position(|&index| index == original_index).unwrap(); //Find the new index of the image we were viewing
+                                order_by_name(&mut image_order, &mut current_index, &mut is_randomized);
                             }
                         }
                     }
