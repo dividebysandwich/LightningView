@@ -1,5 +1,6 @@
 [package]
 name = "lightningview"
+description = "A fast image viewer that supports a wide range of image formats."
 version = "1.5.0"
 edition = "2021"
 build = "build.rs"
@@ -34,9 +35,9 @@ windows = "0.56.0"
 name = "LightningView"
 identifier = "com.lightningview"
 version = "1.5.0"
-icon = "logo_256.png"
+icon = ["logo_256.png"]
 copyright = "2024, the LightningView developers"
-category = "public.app-category.graphics"
+category = "Graphics and Design"
 short_description = "A fast image viewer"
 long_description = "LightningView is a fast image viewer that supports a wide range of image formats. It is designed to be fast and responsive, with a minimal interface that gets out of your way. LightningView is perfect for quickly viewing and sorting through large collections of images."
 linux_exec_args = "%f"
