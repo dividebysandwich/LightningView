@@ -4,6 +4,9 @@ description = "A fast image viewer that supports a wide range of image formats."
 version = "1.5.0"
 edition = "2021"
 build = "build.rs"
+authors = ["The LightningView developers"]
+website = "https://lightningview.app"
+repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
 const_format = "0.2.32"
