@@ -1,8 +1,12 @@
 [package]
 name = "lightningview"
-version = "1.4.0"
+description = "A fast image viewer that supports a wide range of image formats."
+version = "1.5.0"
 edition = "2021"
 build = "build.rs"
+authors = ["The LightningView developers"]
+website = "https://lightningview.app"
+repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
 const_format = "0.2.32"
@@ -29,3 +33,57 @@ winreg = "0.52.0"
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
 windows = "0.56.0"
+
+[package.metadata.bundle]
+name = "LightningView"
+identifier = "com.lightningview"
+version = "1.5.0"
+icon = ["logo_256.png"]
+copyright = "2024, the LightningView developers"
+category = "Graphics and Design"
+short_description = "A fast image viewer"
+long_description = "LightningView is a fast image viewer that supports a wide range of image formats. It is designed to be fast and responsive, with a minimal interface that gets out of your way. LightningView is perfect for quickly viewing and sorting through large collections of images."
+linux_exec_args = "%f"
+linux_mime_types = [
+    "image/jpeg",
+	"image/jpg",
+	"image/pjpeg",
+	"image/png",
+	"image/apng",
+	"image/gif",
+	"image/webp",
+	"image/tiff",
+	"image/bmp",
+	"image/avif",
+	"image/svg+xml",
+	"image/svg",
+	"image/x-png",
+	"image/x-tga",
+	"image/x-targa",
+	"image/x-bmp",
+	"image/vnd.microsoft.icon",
+	"image/vnd.radiance",
+	"image/x‑portable‑bitmap",
+	"image/x‑portable‑graymap",
+	"image/x‑portable‑pixmap",
+	"image/x‑portable‑anymap",
+    "image/x-sony-arw",
+    "image/x-canon-cr2",
+    "image/x-canon-crw",
+    "image/x-kodak-dcr",
+    "image/x-adobe-dng",
+    "image/x-epson-erf",
+    "image/x-kodak-k25",
+    "image/x-kodak-kdc",
+    "image/x-minolta-mrw",
+    "image/x-nikon-nef",
+    "image/x-olympus-orf",
+    "image/x-pentax-pef",
+    "image/x-fuji-raf",
+    "image/x-panasonic-raw",
+    "image/x-sony-sr2",
+    "image/x-sony-srf",
+    "image/x-sigma-x3f",
+    "image/x-samsung-srw",
+    "image/x-panasonic-rw2"    
+]
