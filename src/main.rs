@@ -7,7 +7,7 @@
 use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame, image::{AnimGifImage, AnimGifImageFlags, SharedImage}, prelude::*, window::Window};
 use arboard::{Clipboard, ImageData};
 use rand::seq::SliceRandom;
-use std::{env, error::Error, fs, path::{Path, PathBuf}};
+use std::{env, error::Error, fs, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 use image::io::Reader as ImageReader;
 use image::GenericImageView;
 use log;
@@ -232,7 +232,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut is_randomized = false; // Whether to start with the images in random order
     let mut is_scaled_to_fit = true; // Whether to start with the image zoomed in to fit the screen
     let mut image_order:Vec<usize> = Vec::new();
-    let mut clipboard: Clipboard = Clipboard::new().unwrap();
 
     if args.len() < 2 {
         println!("Usage: {} <image_file>", args[0]);
@@ -521,15 +520,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let eventstate = app::event_state();
                         //Check if the Control key was held down when the 'C' key was pressed
                         if eventstate.contains(fltk::enums::Shortcut::Ctrl) {
-                            log::debug!("Copy image to clipboard");
-                            match copy_to_clipboard(&mut original_image, &mut clipboard) {
-                                Ok(_) => {
-                                    log::debug!("Image copied to clipboard");
+                            let clipboard = Arc::new(Mutex::new(Clipboard::new()));
+                            match Arc::clone(&clipboard).lock() {
+                                Ok(mut clipboard_lock) => {
+                                    let mut clipboard = clipboard_lock.as_mut().unwrap();
+                                    log::debug!("Copy image to clipboard");
+                                    match copy_to_clipboard(&mut original_image, &mut clipboard) {
+                                        Ok(_) => {
+                                            log::debug!("Image copied to clipboard");
+                                        },
+                                        Err(err) => {
+                                            log::error!("Failed to copy image to clipboard: {}", err);
+                                        }
+                                    }
                                 },
                                 Err(err) => {
-                                    log::error!("Failed to copy image to clipboard: {}", err);
+                                    log::error!("Failed to initialize clipboard: {}", err);
                                 }
-                            
                             }
                         }
                         return true;
