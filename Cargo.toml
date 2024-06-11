@@ -15,7 +15,7 @@ image = "0.25.1"
 rand = "0.8.5"
 log = "0.4.21"
 env_logger = "0.11.3"
-arboard = "3.4.0"
+arboard = { version = "3.4.0", features = ["wayland-data-control"] }
 [dependencies.imagepipe]
 version = "0.5.0"
 path = "../imagepipe"
