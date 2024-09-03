@@ -8,7 +8,7 @@ use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame,
 use arboard::{Clipboard, ImageData};
 use rand::seq::SliceRandom;
 use std::{env, error::Error, fs, path::{Path, PathBuf}, sync::{Arc, Mutex}};
-use image::io::Reader as ImageReader;
+use image::ImageReader;
 use image::GenericImageView;
 use log;
 
@@ -234,7 +234,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut image_order:Vec<usize> = Vec::new();
 
     if args.len() < 2 {
-        println!("Usage: {} <image_file>", args[0]);
+        println!("Usage: {} [/windowed] <imagefile>", args[0]);
+        println!("The optional /windowed argument will open the image in a windowed mode instead of fullscreen.");
         #[cfg(target_os = "windows")]
         {
             println!("To register as image viewer in Windows, run: {} /register", args[0]);
@@ -243,7 +244,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     }
 
-    let image_file = &args[1];
+    let mut image_file = &args[1];
+    if args.len() > 2 {
+        if args[1].eq_ignore_ascii_case("/windowed") {
+            is_fullscreen = false;
+            image_file = &args[2];
+        }
+    }
 
     #[cfg(target_os = "windows")]
     {

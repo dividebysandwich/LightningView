@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 build = "build.rs"
 authors = ["The LightningView developers"]
@@ -10,11 +10,11 @@ repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
 const_format = "0.2.32"
-fltk ={ version = "1.4.30", features = ["fltk-bundled"] }
-image = "0.25.1"
+fltk ={ version = "1.4.33", features = ["fltk-bundled"] }
+image = "0.25.2"
 rand = "0.8.5"
-log = "0.4.21"
-env_logger = "0.11.3"
+log = "0.4.22"
+env_logger = "0.11.5"
 arboard = { version = "3.4.0", features = ["wayland-data-control"] }
 [dependencies.imagepipe]
 version = "0.5.0"
@@ -27,17 +27,17 @@ path = "../dnglab/rawler"
 fltk = { git = "https://github.com/fltk-rs/fltk-rs" }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.57.0", features = ["Win32_UI_Shell"]}
+windows = { version = "0.58.0", features = ["Win32_UI_Shell"]}
 winreg = "0.52.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
-windows = "0.57.0"
+windows = "0.58.0"
 
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "1.5.0"
+version = "1.7.0"
 icon = ["logo_256.png"]
 copyright = "2024, the LightningView developers"
 category = "Graphics and Design"
