@@ -29,6 +29,11 @@ To start viewing images:
 lightningview.exe <imagefile.ext>
 ```
 
+To open an image in windowed mode instead of fullscreen:
+```
+lightningview.exe /windowed <imagefile.ext>
+```
+
 To register as default program for viewing images on older versions of Windows:
 ```
 lightningview.exe /register
