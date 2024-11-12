@@ -45,3 +45,5 @@ Cargo.lock
 *.tar.gz
 *.zip
 *.gif
+*.fits
+*.fit
