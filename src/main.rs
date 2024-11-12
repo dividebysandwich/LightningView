@@ -11,9 +11,6 @@ use std::{env, error::Error, fs, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 use image::{ImageReader, Rgb};
 use image::GenericImageView;
 use rustronomy_fits as rsf;
-use ndarray as nd;
-use plotters::prelude::*;
-use ndarray::Array2;
 use log;
 
 #[cfg(target_os = "windows")]
@@ -151,7 +148,7 @@ fn load_fits(image_file: &str) -> Result<SharedImage, String> {
     let (header, data) = fits.remove_hdu(1).unwrap().to_parts();
     let array = match data.unwrap() {
         rsf::Extension::Image(img) => img.as_owned_f32_array(),
-        _ => panic!()
+        _ => return Err("No image data found".to_string())
     };
     
     match array {
@@ -374,6 +371,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         all_supported_formats.extend(&ANIM_SUPPORTED_FORMATS);
         all_supported_formats.extend(&FLTK_SUPPORTED_FORMATS);
         all_supported_formats.extend(&RAW_SUPPORTED_FORMATS);
+        all_supported_formats.extend(&FITS_SUPPORTED_FORMATS);
         image_files = entries
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| {
