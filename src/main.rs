@@ -8,8 +8,12 @@ use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame,
 use arboard::{Clipboard, ImageData};
 use rand::seq::SliceRandom;
 use std::{env, error::Error, fs, path::{Path, PathBuf}, sync::{Arc, Mutex}};
-use image::ImageReader;
+use image::{ImageReader, Rgb};
 use image::GenericImageView;
+use rustronomy_fits as rsf;
+use ndarray as nd;
+use plotters::prelude::*;
+use ndarray::Array2;
 use log;
 
 #[cfg(target_os = "windows")]
@@ -21,6 +25,7 @@ pub const IMAGEREADER_SUPPORTED_FORMATS: [&str; 4] = ["webp", "tif", "tiff", "tg
 pub const ANIM_SUPPORTED_FORMATS: [&str; 1] = ["gif"];
 pub const FLTK_SUPPORTED_FORMATS: [&str; 9] = ["jpg", "jpeg", "png", "bmp", "svg", "ico", "pnm", "xbm", "xpm"];
 pub const RAW_SUPPORTED_FORMATS: [&str; 23] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
+pub const FITS_SUPPORTED_FORMATS: [&str; 1] = ["fits"];
 
 const KEY_C : fltk::enums::Key = fltk::enums::Key::from_char('c');
 
@@ -129,6 +134,63 @@ fn load_animated_image(image_file: &str, widget: &mut Window) -> Result<AnimGifI
     Ok(anim_image)
 }
 
+fn grey_scale(count: f32, min: f32, log_max: f32)
+    -> Result<Rgb<u8>, Box<dyn Error>>
+{
+    let col: u8 =
+    (//This should be within the 0-255 range!
+        255. * (count/min).abs().log10() / log_max
+    ) as u8;
+    // Return a pixel with the same value for R, G, and B
+    Ok(Rgb([col, col, col]))
+}
+
+fn load_fits(image_file: &str) -> Result<SharedImage, String> {
+    log::debug!("Processing as FITS: {}", image_file);
+    let mut fits = rsf::Fits::open(Path::new(image_file)).map_err(|err| format!("Error creating image: {}", err))?;
+    let (header, data) = fits.remove_hdu(1).unwrap().to_parts();
+    let array = match data.unwrap() {
+        rsf::Extension::Image(img) => img.as_owned_f32_array(),
+        _ => panic!()
+    };
+    
+    match array {
+        Ok(a) => {
+            // Normalize the data to fit in the 0-255 range for RGB
+            let min = a.fold(f32::INFINITY, |a, &b| a.min(b));
+            let max = a.fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+
+            let normalized_data = a.mapv(|x| {
+                let scaled = (x - min) / (max - min) * 255.0;
+                scaled.round() as u8
+            });            
+
+            // Create an RGB image of the same size as the FITS image
+            let dim = normalized_data.dim();
+            // get width and height out of dim
+            let width = dim[1];
+            let height = dim[0];
+            let mut rgb_image = image::RgbImage::new(width as u32, height as u32);
+
+            // Iterate over the ndarray and convert to RGB
+            for (pos, count) in normalized_data.indexed_iter() {
+                let pixel = grey_scale(*count as f32, min, max.log10()).map_err(|err| format!("Error creating image: {}", err))?;
+                rgb_image.put_pixel(pos[0] as u32, pos[1] as u32, pixel);
+            }
+            let fltk_img = fltk::image::RgbImage::new(
+                &rgb_image.into_vec(),
+                width as i32,
+                height as i32,
+                fltk::enums::ColorDepth::Rgb8,
+            )
+            .map_err(|err| format!("Processing for \"{}\" failed: {}", image_file, err))?;
+        
+            return SharedImage::from_image(fltk_img).map_err(|err| format!("Error creating image: {}", err));
+        },
+        Err(err) => return Err(format!("Error reading array: {}", err))
+    }
+}
+
 fn load_image(image_file: &str, widget: &mut Window) -> Result<ImageType, String> {
     if FLTK_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match SharedImage::load(image_file) {
@@ -146,6 +208,11 @@ fn load_image(image_file: &str, widget: &mut Window) -> Result<ImageType, String
         match load_raw(image_file) {
             Ok(image) => Ok(ImageType::Shared(image)),
             Err(err) => Err(format!("Error loading RAW image: {}", err)),
+        }
+    } else if FITS_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
+        match load_fits(image_file) {
+            Ok(image) => Ok(ImageType::Shared(image)),
+            Err(err) => Err(format!("Error loading FITS image: {}", err)),
         }
     } else if IMAGEREADER_SUPPORTED_FORMATS.iter().any(|&format| image_file.to_lowercase().ends_with(format)) {
         match load_imagereader(image_file) {

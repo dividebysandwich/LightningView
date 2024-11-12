@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 build = "build.rs"
 authors = ["The LightningView developers"]
@@ -9,13 +9,18 @@ website = "https://lightningview.app"
 repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
-const_format = "0.2.32"
-fltk ={ version = "1.4.33", features = ["fltk-bundled"] }
-image = "0.25.2"
+const_format = "0.2.33"
+fltk ={ version = "1.4.35", features = ["fltk-bundled"] }
+image = "0.25.5"
 rand = "0.8.5"
 log = "0.4.22"
 env_logger = "0.11.5"
-arboard = { version = "3.4.0", features = ["wayland-data-control"] }
+arboard = { version = "3.4.1", features = ["wayland-data-control"] }
+rustronomy-fits = "0.2.0"
+ndarray = {version = "0.16", features = ["blas", "approx", "std"]}
+plotters = {version = "0.3.7", default_features = true, features = ["evcxr", "all_series"]}
+num-traits = {version = "0.2.19"}
+
 [dependencies.imagepipe]
 version = "0.5.0"
 path = "../imagepipe"
@@ -37,7 +42,7 @@ windows = "0.58.0"
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "1.7.0"
+version = "1.8.0"
 icon = ["logo_256.png"]
 copyright = "2024, the LightningView developers"
 category = "Graphics and Design"
@@ -85,5 +90,6 @@ linux_mime_types = [
     "image/x-sony-srf",
     "image/x-sigma-x3f",
     "image/x-samsung-srw",
-    "image/x-panasonic-rw2"    
+    "image/x-panasonic-rw2",
+	"application/fits"
 ]
