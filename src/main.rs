@@ -145,7 +145,7 @@ fn grey_scale(count: f32, min: f32, log_max: f32)
 fn load_fits(image_file: &str) -> Result<SharedImage, String> {
     log::debug!("Processing as FITS: {}", image_file);
     let mut fits = rsf::Fits::open(Path::new(image_file)).map_err(|err| format!("Error creating image: {}", err))?;
-    let (header, data) = fits.remove_hdu(1).unwrap().to_parts();
+    let (_header, data) = fits.remove_hdu(1).unwrap().to_parts();
     let array = match data.unwrap() {
         rsf::Extension::Image(img) => img.as_owned_f32_array(),
         _ => return Err("No image data found".to_string())
@@ -279,7 +279,7 @@ fn order_by_name(image_order: &mut Vec<usize>, current_index: &mut usize, is_ran
 fn order_random(image_order: &mut Vec<usize>, current_index: &mut usize, is_randomized: &mut bool) {
     let original_index = image_order[*current_index];
     //Remember the index of the image we're currently viewing
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     image_order.shuffle(&mut rng);
     log::debug!("Image ordering randomized");
     *is_randomized = true;

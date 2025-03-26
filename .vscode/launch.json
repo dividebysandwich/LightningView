@@ -9,7 +9,7 @@
         "request": "launch",
         "name": "Debug",
         "program": "~/.cargo/bin/cargo",
-        "args": ["run", "${workspaceFolder}/<executable file>"],
+        "args": ["run", "result.fits"],
         "cwd": "${fileDirname}"
     }
     ]
