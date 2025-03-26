@@ -2,10 +2,9 @@
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
 version = "1.8.0"
-edition = "2021"
+edition = "2024"
 build = "build.rs"
 authors = ["The LightningView developers"]
-website = "https://lightningview.app"
 repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
@@ -24,12 +23,12 @@ imagepipe = { git = "https://github.com/dividebysandwich/imagepipe" }
 fltk = { git = "https://github.com/fltk-rs/fltk-rs" }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58.0", features = ["Win32_UI_Shell"]}
-winreg = "0.52.0"
+windows = { version = "0.61.1", features = ["Win32_UI_Shell"]}
+winreg = "0.55.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
-windows = "0.58.0"
+windows = "0.61.1"
 
 [package.metadata.bundle]
 name = "LightningView"
