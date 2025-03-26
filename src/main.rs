@@ -145,7 +145,7 @@ fn grey_scale(count: f32, min: f32, log_max: f32)
 fn load_fits(image_file: &str) -> Result<SharedImage, String> {
     log::debug!("Processing as FITS: {}", image_file);
     let mut fits = rsf::Fits::open(Path::new(image_file)).map_err(|err| format!("Error creating image: {}", err))?;
-    let (_header, data) = fits.remove_hdu(1).unwrap().to_parts();
+    let (_header, data) = fits.remove_hdu(0).unwrap().to_parts();
     let array = match data.unwrap() {
         rsf::Extension::Image(img) => img.as_owned_f32_array(),
         _ => return Err("No image data found".to_string())
@@ -156,7 +156,6 @@ fn load_fits(image_file: &str) -> Result<SharedImage, String> {
             // Normalize the data to fit in the 0-255 range for RGB
             let min = a.fold(f32::INFINITY, |a, &b| a.min(b));
             let max = a.fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-
             let normalized_data = a.mapv(|x| {
                 let scaled = (x - min) / (max - min) * 255.0;
                 scaled.round() as u8
@@ -172,7 +171,9 @@ fn load_fits(image_file: &str) -> Result<SharedImage, String> {
             // Iterate over the ndarray and convert to RGB
             for (pos, count) in normalized_data.indexed_iter() {
                 let pixel = grey_scale(*count as f32, min, max.log10()).map_err(|err| format!("Error creating image: {}", err))?;
-                rgb_image.put_pixel(pos[0] as u32, pos[1] as u32, pixel);
+                if pos[0] < width && pos[1] < height {
+                    rgb_image.put_pixel(pos[0] as u32, pos[1] as u32, pixel);
+                }
             }
             let fltk_img = fltk::image::RgbImage::new(
                 &rgb_image.into_vec(),
