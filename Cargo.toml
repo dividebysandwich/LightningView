@@ -9,12 +9,12 @@ website = "https://lightningview.app"
 repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
-const_format = "0.2.33"
-fltk ={ version = "1.4.35", features = ["fltk-bundled"] }
-image = "0.25.5"
-rand = "0.8.5"
-log = "0.4.22"
-env_logger = "0.11.5"
+const_format = "0.2.34"
+fltk ={ version = "1.5.5", features = ["fltk-bundled"] }
+image = "0.25.6"
+rand = "0.9.0"
+log = "0.4.27"
+env_logger = "0.11.7"
 arboard = { version = "3.4.1", features = ["wayland-data-control"] }
 rustronomy-fits = "0.2.0"
 rawler = { git = "https://github.com/dividebysandwich/dnglab" }
