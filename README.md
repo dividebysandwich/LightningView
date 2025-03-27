@@ -102,6 +102,7 @@ RAW formats:
 * Leaf MOS
 * Canon CR2
 * ARRI's ARI
+* Astrophotography FITS (experimental)
 
 ## TODO / Feature Requests
 
