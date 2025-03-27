@@ -8,9 +8,9 @@ use fltk::{app::{self, MouseWheel}, dialog, enums::{Color, Event}, frame::Frame,
 use arboard::{Clipboard, ImageData};
 use rand::seq::SliceRandom;
 use std::{env, error::Error, fs, path::{Path, PathBuf}, sync::{Arc, Mutex}};
-use image::{ImageReader, Rgb};
-use image::GenericImageView;
+use image::{ImageBuffer, Luma, GenericImageView, ImageReader};
 use rustronomy_fits as rsf;
+use ndarray::{Array, Array2, IxDyn, s};
 use log;
 
 #[cfg(target_os = "windows")]
@@ -131,15 +131,22 @@ fn load_animated_image(image_file: &str, widget: &mut Window) -> Result<AnimGifI
     Ok(anim_image)
 }
 
-fn grey_scale(count: f32, min: f32, log_max: f32)
-    -> Result<Rgb<u8>, Box<dyn Error>>
-{
-    let col: u8 =
-    (//This should be within the 0-255 range!
-        255. * (count/min).abs().log10() / log_max
-    ) as u8;
-    // Return a pixel with the same value for R, G, and B
-    Ok(Rgb([col, col, col]))
+fn rgb_to_grayscale(rgb_image: Result<Array<f32, IxDyn>, Box<dyn std::error::Error>>) -> Result<Array2<f32>, Box<dyn std::error::Error>> {
+    let rgb_array = rgb_image?; // Unwrap Result
+
+    // Ensure the image has 3 dimensions (Height, Width, 3)
+    let shape = rgb_array.shape();
+    if shape.len() != 3 || shape[2] != 3 {
+        return Err("Invalid shape: Expected (H, W, 3)".into());
+    }
+
+    // Convert RGB to grayscale using element-wise operations
+    let grayscale: Array2<f32> = 
+        &rgb_array.slice(s![.., .., 0]) * 0.2989
+        + &rgb_array.slice(s![.., .., 1]) * 0.5870
+        + &rgb_array.slice(s![.., .., 2]) * 0.1140;
+
+    Ok(grayscale)
 }
 
 fn load_fits(image_file: &str) -> Result<SharedImage, String> {
@@ -147,42 +154,93 @@ fn load_fits(image_file: &str) -> Result<SharedImage, String> {
     let mut fits = rsf::Fits::open(Path::new(image_file)).map_err(|err| format!("Error creating image: {}", err))?;
     let (_header, data) = fits.remove_hdu(0).unwrap().to_parts();
     let array = match data.unwrap() {
-        rsf::Extension::Image(img) => img.as_owned_f32_array(),
+        rsf::Extension::Image(img) => {
+            rgb_to_grayscale(img.as_owned_f32_array())
+        },
         _ => return Err("No image data found".to_string())
     };
-    
+    log::debug!("FITS loaded.");
+
+    let log_factor = 3000.0;
+    let gamma = 1.5;
+
     match array {
         Ok(a) => {
-            // Normalize the data to fit in the 0-255 range for RGB
-            let min = a.fold(f32::INFINITY, |a, &b| a.min(b));
-            let max = a.fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-            let normalized_data = a.mapv(|x| {
-                let scaled = (x - min) / (max - min) * 255.0;
-                scaled.round() as u8
-            });            
+            //let normalized_data = downscale_by_factor_4(a.mapv(|x| x as u8));
+            let normalized_data = a;
 
             // Create an RGB image of the same size as the FITS image
             let dim = normalized_data.dim();
             // get width and height out of dim
-            let width = dim[1];
-            let height = dim[0];
-            let mut rgb_image = image::RgbImage::new(width as u32, height as u32);
+            let width = dim.0 as u32;
+            let height = dim.1 as u32;
 
-            // Iterate over the ndarray and convert to RGB
-            for (pos, count) in normalized_data.indexed_iter() {
-                let pixel = grey_scale(*count as f32, min, max.log10()).map_err(|err| format!("Error creating image: {}", err))?;
-                if pos[0] < width && pos[1] < height {
-                    rgb_image.put_pixel(pos[0] as u32, pos[1] as u32, pixel);
-                }
-            }
+            // Convert to f32 for better precision in stretching
+            let data_f32 = normalized_data.mapv(|x| x as f32);
+            log::debug!("F32 conversion done.");
+
+            // Find min and max values
+            let (min_val, max_val) = data_f32.iter().fold((f32::MAX, f32::MIN), |(min, max), &x| {
+                (min.min(x), max.max(x))
+            });
+
+            let scale = 255.0 / (max_val - min_val).max(1e-5); // Avoid division by zero
+
+
+/*            // Parallel Min-Max Stretch
+            data_f32.as_slice_mut().unwrap().par_iter_mut().for_each(|x| {
+                *x = ((*x - min_val) * scale).clamp(0.0, 255.0);
+            });
+
+            // Parallel Log Stretch
+            let mut log_scaled: Vec<u8> = data_f32
+                .as_slice()
+                .unwrap()
+                .par_iter()
+                .map(|&x| (255.0 * ((1.0 + log_factor * (x / 255.0)).ln() / (1.0 + log_factor).ln())) as u8)
+                .collect();
+
+            // Parallel Gamma Correction
+            log_scaled.par_iter_mut().for_each(|x| {
+                *x = ((*x as f32 / 255.0).powf(gamma) * 255.0) as u8;
+            });
+
+            let rgb_image = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(width, height, log_scaled).expect("Error creating image buffer for FITS file");
+            log::debug!("RGB image done.");
+*/
+
+            // Apply stronger min-max normalization (clip 1% of outliers)
+            let stretched = data_f32.mapv(|x| ((x - min_val) * scale).clamp(0.0, 255.0) as u8);
+            log::debug!("Stretch 1 done.");
+
+            // Apply logarithmic stretch with a stronger factor
+            let log_stretched = stretched.mapv(|x| (255.0 * ((1.0 + log_factor * (x as f32 / 255.0)).ln() / (1.0 + log_factor).ln())) as u8);
+            log::debug!("Stretch 2 done.");
+
+            // Apply gamma correction (further increases contrast)
+            let gamma_corrected = log_stretched.mapv(|x| ((x as f32 / 255.0).powf(gamma) * 255.0) as u8);
+            log::debug!("Stretch 3 done.");
+
+            // Convert to Vec<u8>
+            let buffer = gamma_corrected.into_raw_vec();
+            log::debug!("raw vector converted.");
+
+            let rgb_image = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(width, height, buffer).expect("Error creating image buffer for FITS file");
+            log::debug!("RGB image done.");
+
+            let raw_rgb: Vec<u8> = rgb_image
+            .pixels()
+            .flat_map(|Luma([l])| vec![*l, *l, *l]) // Convert grayscale to RGB
+            .collect();
+
             let fltk_img = fltk::image::RgbImage::new(
-                &rgb_image.into_vec(),
+                &raw_rgb,
                 width as i32,
                 height as i32,
                 fltk::enums::ColorDepth::Rgb8,
             )
             .map_err(|err| format!("Processing for \"{}\" failed: {}", image_file, err))?;
-        
+
             return SharedImage::from_image(fltk_img).map_err(|err| format!("Error creating image: {}", err));
         },
         Err(err) => return Err(format!("Error reading array: {}", err))
@@ -289,7 +347,6 @@ fn order_random(image_order: &mut Vec<usize>, current_index: &mut usize, is_rand
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-//    std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     let args: Vec<String> = env::args().collect();
