@@ -250,202 +250,201 @@ impl ImageViewerApp {
 }
 
 impl eframe::App for ImageViewerApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let is_currently_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        if self.is_fullscreen != is_currently_fullscreen {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
-        }
+    if self.is_fullscreen != is_currently_fullscreen {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
+    }
 
-        self.handle_keyboard_input(ctx);
+    self.handle_keyboard_input(ctx);
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
-            .show(ctx, |ui| {
-                if let Some(image) = &mut self.image {
-                    let available_rect = ui.available_rect_before_wrap();
-                    let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
+        .show(ctx, |ui| {
+            if let Some(image) = &mut self.image {
+                let available_rect = ui.available_rect_before_wrap();
+                let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
 
-                    let full_res_size = Vec2::new(image.full_res_image.width() as f32, image.full_res_image.height() as f32);
+                let full_res_size = Vec2::new(image.full_res_image.width() as f32, image.full_res_image.height() as f32);
 
-                    if self.is_scaled_to_fit {
-                        let aspect_ratio = full_res_size.x / full_res_size.y;
-                        let available_aspect = available_rect.width() / available_rect.height();
-                        let mut fit_size = available_rect.size();
-                        if aspect_ratio > available_aspect {
-                            fit_size.y = fit_size.x / aspect_ratio;
-                        } else {
-                            fit_size.x = fit_size.y * aspect_ratio;
-                        }
-                        self.zoom = fit_size.x / full_res_size.x;
-                        self.offset = (available_rect.size() - fit_size) / 2.0;
+                if self.is_scaled_to_fit {
+                    let aspect_ratio = full_res_size.x / full_res_size.y;
+                    let available_aspect = available_rect.width() / available_rect.height();
+                    let mut fit_size = available_rect.size();
+                    if aspect_ratio > available_aspect {
+                        fit_size.y = fit_size.x / aspect_ratio;
+                    } else {
+                        fit_size.x = fit_size.y * aspect_ratio;
                     }
+                    self.zoom = fit_size.x / full_res_size.x;
+                    self.offset = (available_rect.size() - fit_size) / 2.0;
+                }
 
-                    if response.dragged_by(egui::PointerButton::Primary) {
-                        self.offset += response.drag_delta();
+                if response.dragged_by(egui::PointerButton::Primary) {
+                    self.offset += response.drag_delta();
+                    self.is_scaled_to_fit = false;
+                }
+                if let Some(hover_pos) = response.hover_pos() {
+                    let scroll = ui.input(|i| i.raw_scroll_delta.y);
+                    if scroll != 0.0 {
+                        let old_zoom = self.zoom;
+                        let zoom_delta = (scroll / 200.0) * self.zoom;
+                        self.zoom = (self.zoom + zoom_delta).max(0.001);
+                        let image_coords = (hover_pos - available_rect.min - self.offset) / old_zoom;
+                        self.offset -= image_coords * (self.zoom - old_zoom);
                         self.is_scaled_to_fit = false;
                     }
-                    if let Some(hover_pos) = response.hover_pos() {
-                        let scroll = ui.input(|i| i.raw_scroll_delta.y);
-                        if scroll != 0.0 {
-                            let old_zoom = self.zoom;
-                            let zoom_delta = (scroll / 200.0) * self.zoom;
-                            self.zoom = (self.zoom + zoom_delta).max(0.001);
-                            let image_coords = (hover_pos - available_rect.min - self.offset) / old_zoom;
-                            self.offset -= image_coords * (self.zoom - old_zoom);
-                            self.is_scaled_to_fit = false;
-                        }
-                    }
-
-                    let preview_size = image.preview_texture.size_vec2();
-                    let preview_scale = preview_size.x / full_res_size.x;
-                    let show_tiles = image.needs_tiling && self.zoom > preview_scale;
-
-                    if !show_tiles {
-                        let scaled_size = full_res_size * self.zoom;
-                        let image_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
-                        ui.painter().image(
-                            image.preview_texture.id(),
-                            image_rect,
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    } else {
-                        let screen_offset_in_image_pixels = (available_rect.min - (available_rect.min + self.offset)) / self.zoom;
-                        let screen_size_in_image_pixels = available_rect.size() / self.zoom;
-                        let visible_image_rect = Rect::from_min_size(
-                            Pos2::new(screen_offset_in_image_pixels.x, screen_offset_in_image_pixels.y),
-                            screen_size_in_image_pixels,
-                        );
-
-                        let min_col = (visible_image_rect.min.x / TILE_SIZE as f32).floor() as i32;
-                        let max_col = (visible_image_rect.max.x / TILE_SIZE as f32).ceil() as i32;
-                        let min_row = (visible_image_rect.min.y / TILE_SIZE as f32).floor() as i32;
-                        let max_row = (visible_image_rect.max.y / TILE_SIZE as f32).ceil() as i32;
-
-                        for row in min_row..max_row {
-                            for col in min_col..max_col {
-                                if row < 0 || col < 0 { continue; }
-                                let tile_key = (row as usize, col as usize);
-
-                                let texture_id = if let Some(texture) = image.tile_cache.get(&tile_key) {
-                                    texture.id()
-                                } else {
-                                    let image_x = tile_key.1 * TILE_SIZE;
-                                    let image_y = tile_key.0 * TILE_SIZE;
-                                    
-                                    if image_x >= image.full_res_image.width() || image_y >= image.full_res_image.height() {
-                                        continue;
-                                    }
-
-                                    let tile_rect = Rect::from_min_size(Pos2::new(image_x as f32, image_y as f32), Vec2::new(TILE_SIZE as f32, TILE_SIZE as f32));
-                                    
-                                    let tile_image = image.full_res_image.region(&tile_rect, None);
-
-                                    let texture = ctx.load_texture(
-                                        format!("tile_{}_{}", tile_key.0, tile_key.1),
-                                        tile_image,
-                                        Default::default(),
-                                    );
-                                    let id = texture.id();
-                                    image.tile_cache.insert(tile_key, texture);
-                                    id
-                                };
-                                
-                                let tile_min_in_image_pixels = Pos2::new((col * TILE_SIZE as i32) as f32, (row * TILE_SIZE as i32) as f32);
-                                let tile_min_on_screen = available_rect.min + self.offset + tile_min_in_image_pixels.to_vec2() * self.zoom;
-                                let tile_screen_rect = Rect::from_min_size(tile_min_on_screen, Vec2::splat(TILE_SIZE as f32) * self.zoom);
-                                
-                                if available_rect.intersects(tile_screen_rect) {
-                                    ui.painter().image(texture_id, tile_screen_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-                                }
-                            }
-                        }
-                    }
-                    
-                    let scaled_size = full_res_size * self.zoom;
-                    let image_screen_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
-                    if ui.clip_rect().intersects(image_screen_rect) {
-                        ui.painter().add(Shape::Rect(RectShape::stroke(
-                            image_screen_rect,
-                            0.0,
-                            (1.0, Color32::from_gray(80)),
-                            egui::epaint::StrokeKind::Outside,
-                        )));
-                    }
-
-                    response.context_menu(|ui| {
-                        if ui.checkbox(&mut self.is_fullscreen, "Fullscreen (F)").clicked() {
-                           ui.close();
-                        };
-                        if ui.checkbox(&mut self.is_scaled_to_fit, "Scale to fit (Enter)").clicked() {
-                           ui.close();
-                        };
-                        if ui.checkbox(&mut self.is_randomized, "Random order").clicked() {
-                            if self.is_randomized {
-                                let current_image_index = self.image_order[self.current_index];
-                                #[allow(deprecated)]
-                                let mut rng = rand::thread_rng();
-                                use rand::seq::SliceRandom;
-                                self.image_order.shuffle(&mut rng);
-                                if let Some(pos) = self.image_order.iter().position(|&i| i == current_image_index) {
-                                    self.current_index = pos;
-                                }
-                            } else {
-                                let current_image_index = self.image_order[self.current_index];
-                                self.image_order = (0..self.image_files.len()).collect();
-                                if let Some(pos) = self.image_order.iter().position(|&i| i == current_image_index) {
-                                    self.current_index = pos;
-                                }
-                            }
-                            ui.close();
-                        };
-                    });
-
-                } else if let Some(err) = &self.last_error {
-                     ui.centered_and_justified(|ui| {
-                        ui.label(egui::RichText::new(err).color(Color32::RED).size(18.0));
-                    });
                 }
-            });
-            
-        if self.show_delete_confirmation {
+
+                let preview_size = image.preview_texture.size_vec2();
+                let preview_scale = preview_size.x / full_res_size.x;
+                let show_tiles = image.needs_tiling && self.zoom > preview_scale;
+
+                if !show_tiles {
+                    // --- 1. Draw Preview Texture (Zoomed Out) ---
+                    
+                    // Clear the detail tile cache when it's not in use
+                    if !image.tile_cache.is_empty() {
+                        log::debug!("Zoomed out, clearing tile cache of {} textures.", image.tile_cache.len());
+                        image.tile_cache.clear();
+                    }
+
+                    let scaled_size = full_res_size * self.zoom;
+                    let image_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
+                    ui.painter().image(
+                        image.preview_texture.id(),
+                        image_rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    // Draw Detail Tiles (Zoomed In)
+                    let screen_offset_in_image_pixels = (available_rect.min - (available_rect.min + self.offset)) / self.zoom;
+                    let screen_size_in_image_pixels = available_rect.size() / self.zoom;
+                    let visible_image_rect = Rect::from_min_size(Pos2::new(screen_offset_in_image_pixels.x, screen_offset_in_image_pixels.y), screen_size_in_image_pixels);
+
+                    let min_col_f = visible_image_rect.min.x / TILE_SIZE as f32;
+                    let max_col_f = visible_image_rect.max.x / TILE_SIZE as f32;
+                    let min_row_f = visible_image_rect.min.y / TILE_SIZE as f32;
+                    let max_row_f = visible_image_rect.max.y / TILE_SIZE as f32;
+
+                    // Clamp the tile loop bounds to the actual tile grid of the image to prevent visual glitches.
+                    let num_cols = (image.full_res_image.width() + TILE_SIZE - 1) / TILE_SIZE;
+                    let num_rows = (image.full_res_image.height() + TILE_SIZE - 1) / TILE_SIZE;
+
+                    let row_start = (min_row_f.floor() as i32).max(0) as usize;
+                    let row_end = (max_row_f.ceil() as i32).max(0) as usize;
+                    let col_start = (min_col_f.floor() as i32).max(0) as usize;
+                    let col_end = (max_col_f.ceil() as i32).max(0) as usize;
+
+                    for row in row_start..row_end.min(num_rows) {
+                        for col in col_start..col_end.min(num_cols) {
+                            let tile_key = (row, col);
+
+                            let texture_id = if let Some(texture) = image.tile_cache.get(&tile_key) {
+                                texture.id()
+                            } else {
+                                let image_x = col * TILE_SIZE;
+                                let image_y = row * TILE_SIZE;
+                                let tile_rect_in_image = Rect::from_min_size(Pos2::new(image_x as f32, image_y as f32), Vec2::splat(TILE_SIZE as f32));
+                                
+                                let tile_image = image.full_res_image.region(&tile_rect_in_image, None);
+                                let texture = ctx.load_texture(format!("tile_{}_{}", row, col), tile_image, Default::default());
+                                let id = texture.id();
+                                image.tile_cache.insert(tile_key, texture);
+                                id
+                            };
+                            
+                            let tile_min_in_image_pixels = Pos2::new((col * TILE_SIZE) as f32, (row * TILE_SIZE) as f32);
+                            let tile_min_on_screen = available_rect.min + self.offset + tile_min_in_image_pixels.to_vec2() * self.zoom;
+                            let tile_screen_rect = Rect::from_min_size(tile_min_on_screen, Vec2::splat(TILE_SIZE as f32) * self.zoom);
+                            
+                            if available_rect.intersects(tile_screen_rect) {
+                                ui.painter().image(texture_id, tile_screen_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                            }
+                        }
+                    }
+                }
+                
+                let scaled_size = full_res_size * self.zoom;
+                let image_screen_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
+                if ui.clip_rect().intersects(image_screen_rect) {
+                    ui.painter().add(Shape::Rect(RectShape::stroke(image_screen_rect, 0.0, (1.0, Color32::from_gray(80)), egui::epaint::StrokeKind::Outside)));
+                }
+
+                response.context_menu(|ui| {
+                    if ui.checkbox(&mut self.is_fullscreen, "Fullscreen (F)").clicked() {
+                        ui.close();
+                    };
+                    if ui.checkbox(&mut self.is_scaled_to_fit, "Scale to fit (Enter)").clicked() {
+                        ui.close();
+                    };
+                    if ui.checkbox(&mut self.is_randomized, "Random order").clicked() {
+                        if self.is_randomized {
+                            let current_image_index = self.image_order[self.current_index];
+                            #[allow(deprecated)]
+                            let mut rng = rand::thread_rng();
+                            use rand::seq::SliceRandom;
+                            self.image_order.shuffle(&mut rng);
+                            if let Some(pos) = self.image_order.iter().position(|&i| i == current_image_index) {
+                                self.current_index = pos;
+                            }
+                        } else {
+                            let current_image_index = self.image_order[self.current_index];
+                            self.image_order = (0..self.image_files.len()).collect();
+                            if let Some(pos) = self.image_order.iter().position(|&i| i == current_image_index) {
+                                self.current_index = pos;
+                            }
+                        }
+                        ui.close();
+                    };
+                });
+
+            } else if let Some(err) = &self.last_error {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new(err).color(Color32::RED).size(18.0));
+                });
+            }
+        });
+        
+    if self.show_delete_confirmation {
             let path = self.image_files.get(self.image_order[self.current_index]).cloned();
-            egui::Window::new("Delete File")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    if let Some(path) = &path {
-                        ui.label(format!("Are you sure you want to delete '{}'?", path.display()));
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Cancel").clicked() {
-                                self.show_delete_confirmation = false;
-                            }
-                            if ui.button(egui::RichText::new("Delete").color(Color32::RED)).clicked() {
-                                if let Err(e) = fs::remove_file(path) {
-                                    self.last_error = Some(format!("Failed to delete file: {}", e));
-                                } else {
-                                    log::info!("Deleted file: {}", path.display());
-                                    let removed_order_index = self.image_order.remove(self.current_index);
-                                    self.image_files.remove(removed_order_index);
-                                    for order_idx in self.image_order.iter_mut() {
-                                        if *order_idx > removed_order_index {
-                                            *order_idx -= 1;
-                                        }
-                                    }
-                                    if self.image_files.is_empty() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                    } else {
-                                        self.current_index %= self.image_files.len();
-                                        self.load_image_at_index(self.current_index, ctx);
-                                    }
+        egui::Window::new("Delete File")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                if let Some(path) = &path {
+                    ui.label(format!("Are you sure you want to delete '{}'?", path.display()));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.show_delete_confirmation = false;
+                    }
+                    if ui.button(egui::RichText::new("Delete").color(Color32::RED)).clicked() {
+                        if let Err(e) = fs::remove_file(path) {
+                            self.last_error = Some(format!("Failed to delete file: {}", e));
+                        } else {
+                            log::info!("Deleted file: {}", path.display());
+                            let removed_order_index = self.image_order.remove(self.current_index);
+                            self.image_files.remove(removed_order_index);
+                            for order_idx in self.image_order.iter_mut() {
+                                if *order_idx > removed_order_index {
+                                    *order_idx -= 1;
                                 }
-                                self.show_delete_confirmation = false;
                             }
-                        });
+                            if self.image_files.is_empty() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            } else {
+                                self.current_index %= self.image_files.len();
+                                self.load_image_at_index(self.current_index, ctx);
+                            }
+                        }
+                        self.show_delete_confirmation = false;
                     }
                 });
+                }
+            });
         }
     }
 }
