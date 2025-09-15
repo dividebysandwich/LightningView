@@ -8,28 +8,33 @@ authors = ["The LightningView developers"]
 repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
-const_format = "0.2.34"
-fltk ={ version = "1.5.5", features = ["fltk-bundled"] }
-image = "0.25.6"
-rand = "0.9.0"
-log = "0.4.27"
-env_logger = "0.11.7"
-arboard = { version = "3.4.1", features = ["wayland-data-control"] }
-rustronomy-fits = "0.2.0"
-ndarray = "0.15"
+const_format = "0.2"
+eframe = "0.32"
+egui = "0.32"
+image = "0.25"
+rand = "0.9"
+log = "0.4"
+env_logger = "0.11"
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+rustronomy-fits = "0.2"
+ndarray = "0.15.6"
 rawler = { git = "https://github.com/dividebysandwich/dnglab" }
 imagepipe = { git = "https://github.com/dividebysandwich/imagepipe" }
-
-[patch.crates-io]
-fltk = { git = "https://github.com/fltk-rs/fltk-rs" }
+rayon = "1.11.0"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.1", features = ["Win32_UI_Shell"]}
-winreg = "0.55.0"
+windows = { version = "0.62", features = ["Win32_UI_Shell"]}
+winreg = "0.55"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
-windows = "0.61.1"
+windows = "0.62"
+
+[profile.release]
+strip = true
+opt-level = 3
+lto = true
+codegen-units = 1
 
 [package.metadata.bundle]
 name = "LightningView"
