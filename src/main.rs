@@ -38,7 +38,7 @@ struct DisplayableImage {
     /// A single, downscaled texture for fast previews when zoomed out.
     preview_texture: TextureHandle,
     /// Cache for detail tiles to avoid re-uploading them to the GPU every frame.
-    tile_cache: HashMap<(usize, usize), TextureHandle>,
+    tile_cache: HashMap<(usize, usize), (TextureHandle, [usize; 2])>,
     /// Does this image actually need tiling, or is it small enough to fit on the GPU?
     needs_tiling: bool,
 }
@@ -250,8 +250,9 @@ impl ImageViewerApp {
 }
 
 impl eframe::App for ImageViewerApp {
-fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let is_currently_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+    
+fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    let is_currently_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if self.is_fullscreen != is_currently_fullscreen {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
     }
@@ -340,45 +341,42 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
                         for col in col_start..col_end.min(num_cols) {
                             let tile_key = (row, col);
 
-                            let texture_id = if let Some(texture) = image.tile_cache.get(&tile_key) {
-                                texture.id()
+                            // Get both texture and dimensions from cache, or create and cache both.
+                            let (texture_id, tile_dims) = if let Some((texture, dims)) = image.tile_cache.get(&tile_key) {
+                                (texture.id(), *dims)
                             } else {
-                                let full_img = &image.full_res_image;
                                 let x_start = col * TILE_SIZE;
                                 let y_start = row * TILE_SIZE;
-
                                 // Calculate the actual width and height of this tile, clamping to image edges
-                                let tile_w = (x_start + TILE_SIZE).min(full_img.width()) - x_start;
-                                let tile_h = (y_start + TILE_SIZE).min(full_img.height()) - y_start;
+                                let tile_w = (x_start + TILE_SIZE).min(image.full_res_image.width()) - x_start;
+                                let tile_h = (y_start + TILE_SIZE).min(image.full_res_image.height()) - y_start;
 
-                                if tile_w == 0 || tile_h == 0 {
-                                    continue;
-                                }
+                                if tile_w == 0 || tile_h == 0 { continue; }
 
                                 // Manually copy the pixel data row by row
                                 let mut tile_pixels = Vec::with_capacity(tile_w * tile_h);
                                 for y in 0..tile_h {
                                     let src_y = y_start + y;
-                                    let row_start_index = src_y * full_img.width();
+                                    let row_start_index = src_y * image.full_res_image.width();
                                     let row_slice_start = row_start_index + x_start;
-                                    tile_pixels.extend_from_slice(&full_img.pixels[row_slice_start..row_slice_start + tile_w]);
+                                    tile_pixels.extend_from_slice(&image.full_res_image.pixels[row_slice_start..row_slice_start + tile_w]);
                                 }
 
-                                let tile_image = ColorImage {
-                                    size: [tile_w, tile_h],
-                                    pixels: tile_pixels,
-                                    source_size: Vec2::new(full_img.width() as f32, full_img.height() as f32),
-                                };
+                                let tile_image = ColorImage { size: [tile_w, tile_h], pixels: tile_pixels, source_size: Vec2::new(tile_w as f32, tile_h as f32) };
                                 
                                 let texture = ctx.load_texture(format!("tile_{}_{}", row, col), tile_image, Default::default());
                                 let id = texture.id();
-                                image.tile_cache.insert(tile_key, texture);
-                                id
+                                let dims = [tile_w, tile_h];
+                                image.tile_cache.insert(tile_key, (texture, dims));
+                                (id, dims)
                             };
                             
                             let tile_min_in_image_pixels = Pos2::new((col * TILE_SIZE) as f32, (row * TILE_SIZE) as f32);
                             let tile_min_on_screen = available_rect.min + self.offset + tile_min_in_image_pixels.to_vec2() * self.zoom;
-                            let tile_screen_rect = Rect::from_min_size(tile_min_on_screen, Vec2::splat(TILE_SIZE as f32) * self.zoom);
+
+                            // Use the actual tile dimensions for drawing, not the fixed TILE_SIZE.
+                            let tile_dims_vec = Vec2::new(tile_dims[0] as f32, tile_dims[1] as f32);
+                            let tile_screen_rect = Rect::from_min_size(tile_min_on_screen, tile_dims_vec * self.zoom);
                             
                             if available_rect.intersects(tile_screen_rect) {
                                 ui.painter().image(texture_id, tile_screen_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
@@ -390,7 +388,7 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
                 let scaled_size = full_res_size * self.zoom;
                 let image_screen_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
                 if ui.clip_rect().intersects(image_screen_rect) {
-                    ui.painter().add(Shape::Rect(RectShape::stroke(image_screen_rect, 0.0, (1.0, Color32::from_gray(80)), egui::epaint::StrokeKind::Outside)));
+                    ui.painter().add(Shape::Rect(RectShape::stroke(image_screen_rect, 0.0, (1.0, Color32::from_gray(80)), egui::StrokeKind::Outside)));
                 }
 
                 response.context_menu(|ui| {
