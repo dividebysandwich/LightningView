@@ -10,6 +10,7 @@ target/
 *.pdb
 
 # Don't commit test images
+*.JPG
 *.jpg
 *.bmp
 *.mrw

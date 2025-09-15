@@ -2,7 +2,7 @@
 
 use eframe::egui;
 use egui::{epaint::RectShape, Color32, ColorImage, Pos2, Rect, Shape, TextureHandle, Vec2};
-use image::{codecs::gif::GifDecoder, imageops, AnimationDecoder, DynamicImage, GenericImageView, ImageReader, Luma};
+use image::{codecs::gif::GifDecoder, imageops, AnimationDecoder, DynamicImage, ImageReader, Luma};
 use ndarray::{s, Array, Array2, IxDyn};
 use rayon::prelude::*;
 use rustronomy_fits as rsf;
@@ -250,7 +250,7 @@ impl ImageViewerApp {
 }
 
 impl eframe::App for ImageViewerApp {
-fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_currently_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if self.is_fullscreen != is_currently_fullscreen {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
@@ -301,9 +301,6 @@ fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
                 let show_tiles = image.needs_tiling && self.zoom > preview_scale;
 
                 if !show_tiles {
-                    // --- 1. Draw Preview Texture (Zoomed Out) ---
-                    
-                    // Clear the detail tile cache when it's not in use
                     if !image.tile_cache.is_empty() {
                         log::debug!("Zoomed out, clearing tile cache of {} textures.", image.tile_cache.len());
                         image.tile_cache.clear();
@@ -318,10 +315,12 @@ fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
                         Color32::WHITE,
                     );
                 } else {
-                    // Draw Detail Tiles (Zoomed In)
                     let screen_offset_in_image_pixels = (available_rect.min - (available_rect.min + self.offset)) / self.zoom;
                     let screen_size_in_image_pixels = available_rect.size() / self.zoom;
-                    let visible_image_rect = Rect::from_min_size(Pos2::new(screen_offset_in_image_pixels.x, screen_offset_in_image_pixels.y), screen_size_in_image_pixels);
+                    let visible_image_rect = Rect::from_min_size(
+                        Pos2::new(screen_offset_in_image_pixels.x, screen_offset_in_image_pixels.y),
+                        screen_size_in_image_pixels,
+                    );
 
                     let min_col_f = visible_image_rect.min.x / TILE_SIZE as f32;
                     let max_col_f = visible_image_rect.max.x / TILE_SIZE as f32;
@@ -344,11 +343,33 @@ fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
                             let texture_id = if let Some(texture) = image.tile_cache.get(&tile_key) {
                                 texture.id()
                             } else {
-                                let image_x = col * TILE_SIZE;
-                                let image_y = row * TILE_SIZE;
-                                let tile_rect_in_image = Rect::from_min_size(Pos2::new(image_x as f32, image_y as f32), Vec2::splat(TILE_SIZE as f32));
+                                let full_img = &image.full_res_image;
+                                let x_start = col * TILE_SIZE;
+                                let y_start = row * TILE_SIZE;
+
+                                // Calculate the actual width and height of this tile, clamping to image edges
+                                let tile_w = (x_start + TILE_SIZE).min(full_img.width()) - x_start;
+                                let tile_h = (y_start + TILE_SIZE).min(full_img.height()) - y_start;
+
+                                if tile_w == 0 || tile_h == 0 {
+                                    continue;
+                                }
+
+                                // Manually copy the pixel data row by row
+                                let mut tile_pixels = Vec::with_capacity(tile_w * tile_h);
+                                for y in 0..tile_h {
+                                    let src_y = y_start + y;
+                                    let row_start_index = src_y * full_img.width();
+                                    let row_slice_start = row_start_index + x_start;
+                                    tile_pixels.extend_from_slice(&full_img.pixels[row_slice_start..row_slice_start + tile_w]);
+                                }
+
+                                let tile_image = ColorImage {
+                                    size: [tile_w, tile_h],
+                                    pixels: tile_pixels,
+                                    source_size: Vec2::new(full_img.width() as f32, full_img.height() as f32),
+                                };
                                 
-                                let tile_image = image.full_res_image.region(&tile_rect_in_image, None);
                                 let texture = ctx.load_texture(format!("tile_{}_{}", row, col), tile_image, Default::default());
                                 let id = texture.id();
                                 image.tile_cache.insert(tile_key, texture);
@@ -415,9 +436,9 @@ fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 if let Some(path) = &path {
-                    ui.label(format!("Are you sure you want to delete '{}'?", path.display()));
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
+                ui.label(format!("Are you sure you want to delete '{}'?", path.display()));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         self.show_delete_confirmation = false;
                     }
