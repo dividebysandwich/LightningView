@@ -1,12 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-use egui::{Color32, ColorImage, TextureHandle, Vec2};
-use image::{codecs::gif::GifDecoder, AnimationDecoder, DynamicImage, ImageReader, Luma};
+use egui::{epaint::RectShape, Color32, ColorImage, Pos2, Rect, Shape, TextureHandle, Vec2};
+use image::{codecs::gif::GifDecoder, imageops, AnimationDecoder, DynamicImage, GenericImageView, ImageReader, Luma};
 use ndarray::{s, Array, Array2, IxDyn};
 use rayon::prelude::*;
 use rustronomy_fits as rsf;
 use std::{
+    collections::HashMap,
     env,
     error::Error,
     fs,
@@ -20,6 +21,9 @@ mod windows;
 #[cfg(target_os = "windows")]
 use crate::windows::*;
 
+// --- Constants ---
+const TILE_SIZE: usize = 1024; // Use tiles of 1024x1024 pixels for the detail view
+
 // --- Supported Formats ---
 pub const IMAGEREADER_SUPPORTED_FORMATS: [&str; 4] = ["webp", "tif", "tiff", "tga"];
 pub const ANIM_SUPPORTED_FORMATS: [&str; 1] = ["gif"];
@@ -27,51 +31,28 @@ pub const IMAGE_RS_SUPPORTED_FORMATS: [&str; 9] = ["jpg", "jpeg", "png", "bmp", 
 pub const RAW_SUPPORTED_FORMATS: [&str; 23] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari"];
 pub const FITS_SUPPORTED_FORMATS: [&str; 2] = ["fits", "fit"];
 
-// --- Data Structures for egui ---
+// --- Advanced Data Structures for Tiled Viewing ---
+struct DisplayableImage {
+    /// The full-resolution original image, kept in CPU memory.
+    full_res_image: ColorImage,
+    /// A single, downscaled texture for fast previews when zoomed out.
+    preview_texture: TextureHandle,
+    /// Cache for detail tiles to avoid re-uploading them to the GPU every frame.
+    tile_cache: HashMap<(usize, usize), TextureHandle>,
+    /// Does this image actually need tiling, or is it small enough to fit on the GPU?
+    needs_tiling: bool,
+}
+
+// Simplified enum for loaded image data before GPU upload
 enum LoadedImage {
     Static(ColorImage),
-    Animated(Vec<(ColorImage, Duration)>),
-}
-struct DisplayImage {
-    texture: TextureHandle,
-    source_image: ColorImage,
-    size: Vec2,
-}
-struct DisplayAnimation {
-    frames: Vec<(TextureHandle, Duration)>,
-    source_images: Vec<ColorImage>,
-    current_frame: usize,
-    time_accumulator: Duration,
-    size: Vec2,
-}
-enum ImageDisplay {
-    Image(DisplayImage),
-    Animation(DisplayAnimation),
-}
-impl ImageDisplay {
-    fn texture(&self) -> &TextureHandle {
-        match self {
-            ImageDisplay::Image(img) => &img.texture,
-            ImageDisplay::Animation(anim) => &anim.frames[anim.current_frame].0,
-        }
-    }
-    fn size(&self) -> Vec2 {
-        match self {
-            ImageDisplay::Image(img) => img.size,
-            ImageDisplay::Animation(anim) => anim.size,
-        }
-    }
-    fn source_image(&self) -> &ColorImage {
-        match self {
-            ImageDisplay::Image(img) => &img.source_image,
-            ImageDisplay::Animation(anim) => &anim.source_images[anim.current_frame],
-        }
-    }
+    // For simplicity, this advanced example will treat GIFs as static, showing the first frame.
+    // A fully tiled animated viewer is significantly more complex.
 }
 
 // --- Main Application State ---
 struct ImageViewerApp {
-    image_display: Option<ImageDisplay>,
+    image: Option<DisplayableImage>,
     image_files: Vec<PathBuf>,
     current_index: usize,
     image_order: Vec<usize>,
@@ -88,7 +69,7 @@ struct ImageViewerApp {
 impl ImageViewerApp {
     fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, initial_fullscreen: bool) -> Self {
         let mut app = Self {
-            image_display: None,
+            image: None,
             image_files: Vec::new(),
             current_index: 0,
             image_order: Vec::new(),
@@ -112,6 +93,64 @@ impl ImageViewerApp {
             app.last_error = Some("No image file specified.".to_string());
         }
         app
+    }
+
+    fn load_image_at_index(&mut self, index: usize, ctx: &egui::Context) {
+        self.current_index = index;
+        let path = &self.image_files[self.image_order[self.current_index]];
+        log::info!("Loading image: {}", path.display());
+        let start_time = Instant::now();
+
+        match load_image(path) {
+            Ok(LoadedImage::Static(full_res_image)) => {
+                let max_texture_side = 2048; // TODO: Detect limit
+                let needs_tiling = full_res_image.width() > max_texture_side || full_res_image.height() > max_texture_side;
+
+                let preview_image = if needs_tiling {
+                    downscale_color_image(full_res_image.clone(), max_texture_side)
+                } else {
+                    full_res_image.clone()
+                };
+
+                let preview_texture = ctx.load_texture(
+                    format!("{}_preview", path.display()),
+                    preview_image,
+                    Default::default(),
+                );
+
+                self.image = Some(DisplayableImage {
+                    full_res_image,
+                    preview_texture,
+                    tile_cache: HashMap::new(),
+                    needs_tiling,
+                });
+
+                self.is_scaled_to_fit = true;
+                self.last_error = None;
+                log::info!("Loaded '{}' in {:.2?}", path.display(), start_time.elapsed());
+            }
+            Err(e) => {
+                self.last_error = Some(e.clone());
+                self.image = None;
+                log::error!("Failed to load image: {}", e);
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    fn copy_to_clipboard(&mut self) {
+        if let (Some(clipboard), Some(image)) = (&mut self.clipboard, &self.image) {
+            let image_data = arboard::ImageData {
+                width: image.full_res_image.width(),
+                height: image.full_res_image.height(),
+                bytes: image.full_res_image.as_raw().into(),
+            };
+            if let Err(e) = clipboard.set_image(image_data) {
+                self.last_error = Some(format!("Failed to copy to clipboard: {}", e));
+            } else {
+                log::info!("Image copied to clipboard.");
+            }
+        }
     }
 
     fn gather_images_from_directory(&mut self, file_path: &Path) {
@@ -155,61 +194,6 @@ impl ImageViewerApp {
         }
     }
     
-    fn load_image_at_index(&mut self, index: usize, ctx: &egui::Context) {
-        self.current_index = index;
-        let path = &self.image_files[self.image_order[self.current_index]];
-
-        log::info!("Loading image: {}", path.display());
-        let start_time = Instant::now();
-
-        match load_image(path) {
-            Ok(loaded_image) => {
-                let display = match loaded_image {
-                    LoadedImage::Static(color_image) => {
-                        let size = Vec2::new(color_image.width() as f32, color_image.height() as f32);
-                        let texture = ctx.load_texture(format!("{}", path.display()), color_image.clone(), Default::default());
-                        ImageDisplay::Image(DisplayImage {
-                            texture,
-                            source_image: color_image,
-                            size,
-                        })
-                    }
-                    LoadedImage::Animated(frames) => {
-                        let size = frames.get(0).map_or(Vec2::ZERO, |(img, _)| Vec2::new(img.width() as f32, img.height() as f32));
-                        let source_images = frames.iter().map(|(img, _)| img.clone()).collect();
-                        let display_frames = frames
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, (img, delay))| {
-                                let texture = ctx.load_texture(format!("{}[{}]", path.display(), i), img, Default::default());
-                                (texture, delay)
-                            })
-                            .collect();
-
-                        ImageDisplay::Animation(DisplayAnimation {
-                            frames: display_frames,
-                            source_images,
-                            current_frame: 0,
-                            time_accumulator: Duration::ZERO,
-                            size,
-                        })
-                    }
-                };
-
-                self.image_display = Some(display);
-                self.is_scaled_to_fit = true;
-                self.last_error = None;
-                log::info!("Loaded in {:.2?}", start_time.elapsed());
-            }
-            Err(e) => {
-                self.last_error = Some(e);
-                self.image_display = None;
-                log::error!("Failed to load image: {}", self.last_error.as_ref().unwrap());
-            }
-        }
-        ctx.request_repaint();
-    }
-    
     fn next_image(&mut self, ctx: &egui::Context) {
         if !self.image_files.is_empty() {
             self.load_image_at_index((self.current_index + 1) % self.image_files.len(), ctx);
@@ -221,35 +205,19 @@ impl ImageViewerApp {
             self.load_image_at_index((self.current_index + self.image_files.len() - 1) % self.image_files.len(), ctx);
         }
     }
-
+    
     fn first_image(&mut self, ctx: &egui::Context) {
         if !self.image_files.is_empty() {
             self.load_image_at_index(0, ctx);
         }
     }
-
+    
     fn last_image(&mut self, ctx: &egui::Context) {
         if !self.image_files.is_empty() {
             self.load_image_at_index(self.image_files.len() - 1, ctx);
         }
     }
-
-    fn copy_to_clipboard(&mut self) {
-        if let (Some(clipboard), Some(display)) = (&mut self.clipboard, &self.image_display) {
-            let image = display.source_image();
-            let image_data = arboard::ImageData {
-                width: image.width(),
-                height: image.height(),
-                bytes: image.as_raw().into(),
-            };
-            if let Err(e) = clipboard.set_image(image_data) {
-                self.last_error = Some(format!("Failed to copy to clipboard: {}", e));
-            } else {
-                log::info!("Image copied to clipboard.");
-            }
-        }
-    }
-
+    
     fn handle_keyboard_input(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
             self.next_image(ctx);
@@ -293,61 +261,124 @@ impl eframe::App for ImageViewerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
             .show(ctx, |ui| {
-                if let Some(display) = &mut self.image_display {
-                    if let ImageDisplay::Animation(anim) = display {
-                        anim.time_accumulator += Duration::from_secs_f32(ctx.input(|i| i.stable_dt));
-                        let current_delay = anim.frames[anim.current_frame].1;
-                        if anim.time_accumulator >= current_delay {
-                            anim.time_accumulator -= current_delay;
-                            anim.current_frame = (anim.current_frame + 1) % anim.frames.len();
-                            ctx.request_repaint();
-                        }
-                    }
-
+                if let Some(image) = &mut self.image {
                     let available_rect = ui.available_rect_before_wrap();
                     let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
 
-                    if self.is_scaled_to_fit {
-                        let img_size = display.size();
-                        let aspect_ratio = img_size.x / img_size.y;
-                        let available_aspect = available_rect.width() / available_rect.height();
+                    let full_res_size = Vec2::new(image.full_res_image.width() as f32, image.full_res_image.height() as f32);
 
+                    if self.is_scaled_to_fit {
+                        let aspect_ratio = full_res_size.x / full_res_size.y;
+                        let available_aspect = available_rect.width() / available_rect.height();
                         let mut fit_size = available_rect.size();
                         if aspect_ratio > available_aspect {
                             fit_size.y = fit_size.x / aspect_ratio;
                         } else {
                             fit_size.x = fit_size.y * aspect_ratio;
                         }
-                        self.zoom = fit_size.x / img_size.x;
+                        self.zoom = fit_size.x / full_res_size.x;
                         self.offset = (available_rect.size() - fit_size) / 2.0;
                     }
+
                     if response.dragged_by(egui::PointerButton::Primary) {
                         self.offset += response.drag_delta();
                         self.is_scaled_to_fit = false;
                     }
-
                     if let Some(hover_pos) = response.hover_pos() {
                         let scroll = ui.input(|i| i.raw_scroll_delta.y);
                         if scroll != 0.0 {
+                            let old_zoom = self.zoom;
                             let zoom_delta = (scroll / 200.0) * self.zoom;
-                            let new_zoom = (self.zoom + zoom_delta).max(0.01);
-                            let image_coords = (hover_pos - available_rect.min - self.offset) / self.zoom;
-                            self.offset -= image_coords * (new_zoom - self.zoom);
-                            self.zoom = new_zoom;
+                            self.zoom = (self.zoom + zoom_delta).max(0.001);
+                            let image_coords = (hover_pos - available_rect.min - self.offset) / old_zoom;
+                            self.offset -= image_coords * (self.zoom - old_zoom);
                             self.is_scaled_to_fit = false;
                         }
                     }
 
-                    let scaled_size = display.size() * self.zoom;
-                    let image_rect = egui::Rect::from_min_size(available_rect.min + self.offset, scaled_size);
-                    ui.painter().image(display.texture().id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    let preview_size = image.preview_texture.size_vec2();
+                    let preview_scale = preview_size.x / full_res_size.x;
+                    let show_tiles = image.needs_tiling && self.zoom > preview_scale;
+
+                    if !show_tiles {
+                        let scaled_size = full_res_size * self.zoom;
+                        let image_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
+                        ui.painter().image(
+                            image.preview_texture.id(),
+                            image_rect,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        let screen_offset_in_image_pixels = (available_rect.min - (available_rect.min + self.offset)) / self.zoom;
+                        let screen_size_in_image_pixels = available_rect.size() / self.zoom;
+                        let visible_image_rect = Rect::from_min_size(
+                            Pos2::new(screen_offset_in_image_pixels.x, screen_offset_in_image_pixels.y),
+                            screen_size_in_image_pixels,
+                        );
+
+                        let min_col = (visible_image_rect.min.x / TILE_SIZE as f32).floor() as i32;
+                        let max_col = (visible_image_rect.max.x / TILE_SIZE as f32).ceil() as i32;
+                        let min_row = (visible_image_rect.min.y / TILE_SIZE as f32).floor() as i32;
+                        let max_row = (visible_image_rect.max.y / TILE_SIZE as f32).ceil() as i32;
+
+                        for row in min_row..max_row {
+                            for col in min_col..max_col {
+                                if row < 0 || col < 0 { continue; }
+                                let tile_key = (row as usize, col as usize);
+
+                                let texture_id = if let Some(texture) = image.tile_cache.get(&tile_key) {
+                                    texture.id()
+                                } else {
+                                    let image_x = tile_key.1 * TILE_SIZE;
+                                    let image_y = tile_key.0 * TILE_SIZE;
+                                    
+                                    if image_x >= image.full_res_image.width() || image_y >= image.full_res_image.height() {
+                                        continue;
+                                    }
+
+                                    let tile_rect = Rect::from_min_size(Pos2::new(image_x as f32, image_y as f32), Vec2::new(TILE_SIZE as f32, TILE_SIZE as f32));
+                                    
+                                    let tile_image = image.full_res_image.region(&tile_rect, None);
+
+                                    let texture = ctx.load_texture(
+                                        format!("tile_{}_{}", tile_key.0, tile_key.1),
+                                        tile_image,
+                                        Default::default(),
+                                    );
+                                    let id = texture.id();
+                                    image.tile_cache.insert(tile_key, texture);
+                                    id
+                                };
+                                
+                                let tile_min_in_image_pixels = Pos2::new((col * TILE_SIZE as i32) as f32, (row * TILE_SIZE as i32) as f32);
+                                let tile_min_on_screen = available_rect.min + self.offset + tile_min_in_image_pixels.to_vec2() * self.zoom;
+                                let tile_screen_rect = Rect::from_min_size(tile_min_on_screen, Vec2::splat(TILE_SIZE as f32) * self.zoom);
+                                
+                                if available_rect.intersects(tile_screen_rect) {
+                                    ui.painter().image(texture_id, tile_screen_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                                }
+                            }
+                        }
+                    }
+                    
+                    let scaled_size = full_res_size * self.zoom;
+                    let image_screen_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
+                    if ui.clip_rect().intersects(image_screen_rect) {
+                        ui.painter().add(Shape::Rect(RectShape::stroke(
+                            image_screen_rect,
+                            0.0,
+                            (1.0, Color32::from_gray(80)),
+                            egui::epaint::StrokeKind::Outside,
+                        )));
+                    }
 
                     response.context_menu(|ui| {
                         if ui.checkbox(&mut self.is_fullscreen, "Fullscreen (F)").clicked() {
-                            ui.close();
+                           ui.close();
                         };
                         if ui.checkbox(&mut self.is_scaled_to_fit, "Scale to fit (Enter)").clicked() {
-                            ui.close();
+                           ui.close();
                         };
                         if ui.checkbox(&mut self.is_randomized, "Random order").clicked() {
                             if self.is_randomized {
@@ -369,13 +400,14 @@ impl eframe::App for ImageViewerApp {
                             ui.close();
                         };
                     });
+
                 } else if let Some(err) = &self.last_error {
                      ui.centered_and_justified(|ui| {
                         ui.label(egui::RichText::new(err).color(Color32::RED).size(18.0));
                     });
                 }
             });
-
+            
         if self.show_delete_confirmation {
             let path = self.image_files.get(self.image_order[self.current_index]).cloned();
             egui::Window::new("Delete File")
@@ -418,22 +450,45 @@ impl eframe::App for ImageViewerApp {
     }
 }
 
-// --- Image Loading Logic ---
+// --- Image Loading & Helper Functions ---
+
 fn load_image(path: &Path) -> Result<LoadedImage, String> {
     let path_str = path.to_string_lossy();
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    
     if ANIM_SUPPORTED_FORMATS.contains(&extension.as_str()) {
-        load_animated_gif(&path_str)
-    } else {
-        let dynamic_image = if RAW_SUPPORTED_FORMATS.contains(&extension.as_str()) {
-            load_raw(&path_str)
-        } else if FITS_SUPPORTED_FORMATS.contains(&extension.as_str()) {
-            load_fits(&path_str)
-        } else {
-            load_with_image_crate(&path_str)
-        }?;
-        Ok(LoadedImage::Static(to_egui_color_image(dynamic_image)))
+        let frames = load_animated_gif_frames(&path_str)?;
+        let first_frame = frames.into_iter().next().map(|(img, _)| img).ok_or_else(|| "GIF has no frames".to_string())?;
+        return Ok(LoadedImage::Static(first_frame));
     }
+
+    let dynamic_image = if RAW_SUPPORTED_FORMATS.contains(&extension.as_str()) {
+        load_raw(&path_str)
+    } else if FITS_SUPPORTED_FORMATS.contains(&extension.as_str()) {
+        load_fits(&path_str)
+    } else {
+        load_with_image_crate(&path_str)
+    }?;
+
+    Ok(LoadedImage::Static(to_egui_color_image(dynamic_image)))
+}
+
+fn load_animated_gif_frames(path: &str) -> Result<Vec<(ColorImage, Duration)>, String> {
+    let file = fs::File::open(path).map_err(|e| format!("Failed to open GIF: {}", e))?;
+    let reader = BufReader::new(file);
+    let decoder = GifDecoder::new(reader).map_err(|e| format!("Failed to create GIF decoder: {}", e))?;
+    let frames = decoder.into_frames().collect_frames().map_err(|e| format!("Failed to decode GIF frames: {}", e))?;
+
+    Ok(frames
+        .into_iter()
+        .map(|frame| {
+            let delay = Duration::from(frame.delay());
+            let image_buffer = frame.into_buffer();
+            let dims = image_buffer.dimensions();
+            let color_image = ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], image_buffer.as_raw());
+            (color_image, delay)
+        })
+        .collect())
 }
 
 fn to_egui_color_image(img: DynamicImage) -> ColorImage {
@@ -450,27 +505,6 @@ fn load_with_image_crate(path: &str) -> Result<DynamicImage, String> {
         .map_err(|e| format!("Failed to decode {}: {}", path, e))
 }
 
-fn load_animated_gif(path: &str) -> Result<LoadedImage, String> {
-    log::debug!("Loading animated GIF: {}", path);
-    let file = fs::File::open(path).map_err(|e| format!("Failed to open GIF: {}", e))?;
-    let reader = BufReader::new(file);
-    let decoder = GifDecoder::new(reader).map_err(|e| format!("Failed to create GIF decoder: {}", e))?;
-    let frames = decoder.into_frames().collect_frames().map_err(|e| format!("Failed to decode GIF frames: {}", e))?;
-
-    let egui_frames: Vec<(ColorImage, Duration)> = frames
-        .into_iter()
-        .map(|frame| {
-            let delay = Duration::from(frame.delay());
-            let image_buffer = frame.into_buffer();
-            let dims = image_buffer.dimensions();
-            let color_image = ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], image_buffer.as_raw());
-            (color_image, delay)
-        })
-        .collect();
-
-    Ok(LoadedImage::Animated(egui_frames))
-}
-
 fn load_raw(path: &str) -> Result<DynamicImage, String> {
     log::debug!("Loading RAW: {}", path);
     let mut pipeline = imagepipe::Pipeline::new_from_file(path).map_err(|e| format!("Failed to load RAW: {}", e))?;
@@ -484,7 +518,7 @@ fn load_raw(path: &str) -> Result<DynamicImage, String> {
 fn load_fits(path: &str) -> Result<DynamicImage, String> {
     log::debug!("Loading FITS: {}", path);
     let mut fits = rsf::Fits::open(Path::new(path)).map_err(|e| format!("FITS open error: {}", e))?;
-    let hdu = fits.remove_hdu(0).ok_or_else(|| "FITS HDU error: could not remove HDU".to_string())?;
+    let hdu = fits.remove_hdu(0).ok_or_else(|| "FITS HDU error: failed to remove HDU".to_string())?;
     let data = hdu.to_parts().1.ok_or("No data in FITS HDU")?;
 
     let array = match data {
@@ -540,6 +574,19 @@ fn get_absolute_path(filename: &str) -> Result<PathBuf, String> {
             })
             .map_err(|e| format!("Failed to get current dir: {}", e))
     }
+}
+
+fn downscale_color_image(image: ColorImage, max_size: usize) -> ColorImage {
+    let size = image.size;
+    let rgba_image = image::RgbaImage::from_raw(size[0] as u32, size[1] as u32, image.pixels.iter().flat_map(|c| c.to_array()).collect()).unwrap();
+    let (width, height) = (rgba_image.width(), rgba_image.height());
+    let new_dims = if width > max_size as u32 || height > max_size as u32 {
+        let aspect_ratio = width as f32 / height as f32;
+        if width > height { (max_size as u32, (max_size as f32 / aspect_ratio) as u32) } 
+        else { ((max_size as f32 * aspect_ratio) as u32, max_size as u32) }
+    } else { (width, height) };
+    let resized_img = imageops::resize(&rgba_image, new_dims.0, new_dims.1, imageops::FilterType::Lanczos3);
+    ColorImage::from_rgba_unmultiplied([resized_img.width() as _, resized_img.height() as _], resized_img.as_raw())
 }
 
 // --- Main Entry Point ---

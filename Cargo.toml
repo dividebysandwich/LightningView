@@ -11,7 +11,7 @@ repository = "https://github.com/dividebysandwich/LightningView"
 const_format = "0.2"
 eframe = "0.32"
 egui = "0.32"
-image = "0.25"
+image = { version = "0.25", features = ["webp", "tiff", "tga", "gif"] }
 rand = "0.9"
 log = "0.4"
 env_logger = "0.11"
