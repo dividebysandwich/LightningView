@@ -2,6 +2,7 @@
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
 version = "2.0.0"
+license = "GPLv2"
 edition = "2024"
 build = "build.rs"
 authors = ["The LightningView developers"]
@@ -40,6 +41,7 @@ codegen-units = 1
 name = "LightningView"
 identifier = "com.lightningview"
 version = "2.0.0"
+license = "GPLv2"
 icon = ["logo_256.png"]
 copyright = "2024, the LightningView developers"
 category = "Graphics and Design"
