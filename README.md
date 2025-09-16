@@ -11,6 +11,7 @@ This is a very slim image viewer that aims to replicate the most important funct
 * Cross Platform
 * Common image format support
 * RAW file support for popular cameras
+* Basic FITS support with autostretching
 * Browsing through the current directory with arrow keys
 * Pan/Zoom with the mouse
 * Basic file operations such as deletion
@@ -21,6 +22,7 @@ This is a very slim image viewer that aims to replicate the most important funct
 * Any form of image modification
 * File format conversion
 * Plugin system
+* Complex histogram based stretching for FITS
 
 ## Command Line Parameters
 
@@ -107,6 +109,7 @@ RAW formats:
 ## TODO / Feature Requests
 
 * Add a way to edit the currently viewed file
+* Improved FITS handling
 * Display sorting mode on screen when pressing R or N
 * OpenCL support for RAW processing
 
