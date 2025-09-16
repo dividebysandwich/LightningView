@@ -251,7 +251,7 @@ impl ImageViewerApp {
 
 impl eframe::App for ImageViewerApp {
     
-fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
     let is_currently_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if self.is_fullscreen != is_currently_fullscreen {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
