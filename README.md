@@ -24,16 +24,22 @@ This is a very slim image viewer that aims to replicate the most important funct
 * Plugin system
 * Complex histogram based stretching for FITS
 
+## Installation
+
+Download the appropriate package from the [release page](https://github.com/dividebysandwich/LightningView/releases)
+
+Arch Linux users can install by running ```yay -S lightningview``` or ```paru -S lightningview```
+
 ## Command Line Parameters
 
 To start viewing images:
 ```
-lightningview.exe <imagefile.ext>
+lightningview <imagefile.ext>
 ```
 
 To open an image in windowed mode instead of fullscreen:
 ```
-lightningview.exe /windowed <imagefile.ext>
+lightningview /windowed <imagefile.ext>
 ```
 
 To register as default program for viewing images on older versions of Windows:
