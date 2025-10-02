@@ -655,7 +655,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
-            .with_min_inner_size([300.0, 200.0]),
+            .with_min_inner_size([300.0, 200.0])
+	    .with_app_id("lightningview"),
         ..Default::default()
     };
 
