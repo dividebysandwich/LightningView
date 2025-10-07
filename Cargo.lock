@@ -1971,7 +1971,7 @@ dependencies = [
 [[package]]
 name = "imagepipe"
 version = "0.5.0"
-source = "git+https://github.com/dividebysandwich/imagepipe#cc9df677831a052a21e4587633d877a1e8850a10"
+source = "git+https://github.com/dividebysandwich/imagepipe?rev=cc9df677#cc9df677831a052a21e4587633d877a1e8850a10"
 dependencies = [
  "bincode",
  "blake3",
@@ -1980,7 +1980,7 @@ dependencies = [
  "log",
  "multicache",
  "num-traits",
- "rawler",
+ "rawler 0.7.1 (git+https://github.com/dividebysandwich/dnglab)",
  "rayon",
  "serde",
  "serde_derive",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "lightningview"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "arboard",
  "const_format",
@@ -2411,7 +2411,7 @@ dependencies = [
  "log",
  "ndarray",
  "rand 0.9.2",
- "rawler",
+ "rawler 0.7.1 (git+https://github.com/dividebysandwich/dnglab?rev=6b7cfeb8)",
  "rayon",
  "rustronomy-fits",
  "windows 0.62.2",
@@ -3571,6 +3571,39 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+
+[[package]]
+name = "rawler"
+version = "0.7.1"
+source = "git+https://github.com/dividebysandwich/dnglab?rev=6b7cfeb8#6b7cfeb87c33c9839b381e40f610ee6262b1fdf5"
+dependencies = [
+ "backtrace",
+ "bitstream-io 4.9.0",
+ "byteorder",
+ "chrono",
+ "enumn",
+ "glob",
+ "hex",
+ "image 0.25.8",
+ "itertools 0.14.0",
+ "jxl-oxide",
+ "lazy_static",
+ "libflate",
+ "log",
+ "md5",
+ "memmap2",
+ "multiversion",
+ "num",
+ "num_enum",
+ "rayon",
+ "rustc_version",
+ "serde",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "uuid",
+ "weezl",
+ "zerocopy",
+]
 
 [[package]]
 name = "rawler"
