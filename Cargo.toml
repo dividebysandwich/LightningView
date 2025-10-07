@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "2.1.0"
+version = "2.2.0"
 license = "GPLv2"
 edition = "2024"
 build = "build.rs"
@@ -40,7 +40,7 @@ codegen-units = 1
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "2.1.0"
+version = "2.2.0"
 license = "GPLv2"
 icon = ["logo_256.png"]
 copyright = "2025, the LightningView developers"
@@ -82,6 +82,7 @@ linux_mime_types = [
     "image/x-minolta-mrw",
     "image/x-nikon-nef",
     "image/x-olympus-orf",
+    "image/x-olympus-ori",
     "image/x-pentax-pef",
     "image/x-fuji-raf",
     "image/x-panasonic-raw",
