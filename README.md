@@ -133,3 +133,7 @@ Under Linux, you may need to install additional dependencies first:
 apt install libx11-dev libcairo-dev libxcursor-dev libxfixes-dev libxinerama-dev libxft-dev libpango1.0-dev libstdc++-11-dev
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=dividebysandwich/LightningView&type=date&legend=top-left)](https://www.star-history.com/#dividebysandwich/LightningView&type=date&legend=top-left)
+
