@@ -109,26 +109,205 @@
                     </Component>
                     -->
 
-                    <Directory Id='Bin' Name='bin'>
-                        <Component Id='Path' Guid='B9449630-4CFC-4D45-B7FB-59D6FACF7AA7' KeyPath='yes'>
-                            <Environment
-                                Id='PATH'
-                                Name='PATH'
-                                Value='[Bin]'
-                                Permanent='no'
-                                Part='last'
-                                Action='set'
-                                System='yes'/>
-                        </Component>
-                        <Component Id='binary0' Guid='*'>
-                            <File
-                                Id='exe0'
-                                Name='lightningview.exe'
-                                DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\lightningview.exe'
-                                KeyPath='yes'/>
-                        </Component>
-                    </Directory>
+                    <Component Id='Path' Guid='B9449630-4CFC-4D45-B7FB-59D6FACF7AA7' KeyPath='yes'>
+                        <Environment
+                            Id='PATH'
+                            Name='PATH'
+                            Value='[APPLICATIONFOLDER]'
+                            Permanent='no'
+                            Part='last'
+                            Action='set'
+                            System='yes'/>
+                    </Component>
+<Component Id='binary0' Guid='*'>
+                    <File
+                        Id='exe0'
+                        Name='lightningview.exe'
+                        DiskId='1'
+                        Source='$(var.CargoTargetBinDir)\lightningview.exe'
+                        KeyPath='yes'/>
+                    
+                    <ProgId Id='LightningView.Image.1' Description='LightningView Image File' Icon='exe0'>
+                        
+                        <Extension Id='png'>
+                            <Verb Id='open_png' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='jpg'>
+                            <Verb Id='open_jpg' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='jpeg'>
+                            <Verb Id='open_jpeg' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='bmp'>
+                            <Verb Id='open_bmp' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='gif'>
+                            <Verb Id='open_gif' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='ico'>
+                            <Verb Id='open_ico' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='jxl'>
+                            <Verb Id='open_jxl' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='pnm'>
+                            <Verb Id='open_pnm' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='svg'>
+                            <Verb Id='open_svg' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='tiff'>
+                            <Verb Id='open_tiff' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='tif'>
+                            <Verb Id='open_tif' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='tga'>
+                            <Verb Id='open_tga' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='webp'>
+                            <Verb Id='open_webp' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='xbm'>
+                            <Verb Id='open_xbm' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='xpm'>
+                            <Verb Id='open_xpm' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='mrw'>
+                            <Verb Id='open_mrw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='arw'>
+                            <Verb Id='open_arw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='srf'>
+                            <Verb Id='open_srf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='sr2'>
+                            <Verb Id='open_sr2' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='mef'>
+                            <Verb Id='open_mef' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='orf'>
+                            <Verb Id='open_orf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='srw'>
+                            <Verb Id='open_srw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='erf'>
+                            <Verb Id='open_erf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='kdc'>
+                            <Verb Id='open_kdc' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='dcs'>
+                            <Verb Id='open_dcs' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='rw2'>
+                            <Verb Id='open_rw2' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='raf'>
+                            <Verb Id='open_raf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='dcr'>
+                            <Verb Id='open_dcr' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='dng'>
+                            <Verb Id='open_dng' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='pef'>
+                            <Verb Id='open_pef' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='crw'>
+                            <Verb Id='open_crw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='iiq'>
+                            <Verb Id='open_iiq' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='3fr'>
+                            <Verb Id='open_3fr' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='nrw'>
+                            <Verb Id='open_nrw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='nef'>
+                            <Verb Id='open_nef' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='mos'>
+                            <Verb Id='open_mos' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='cr2'>
+                            <Verb Id='open_cr2' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='ari'>
+                            <Verb Id='open_ari' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='ori'>
+                            <Verb Id='open_ori' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='fit'>
+                            <Verb Id='open_fit' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                        <Extension Id='fits'>
+                            <Verb Id='open_fits' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                        </Extension>
+                    </ProgId>
+                    <RegistryKey Root='HKLM' Key='SOFTWARE\LightningView\Capabilities'>
+                        <RegistryValue Name='ApplicationName' Value='LightningView' Type='string' />
+                        <RegistryValue Name='ApplicationDescription' Value='A fast image viewer that supports a wide range of image formats.' Type='string' />
+                        <RegistryValue Name='ApplicationIcon' Value='[#exe0]' Type='string' />
+                    </RegistryKey>
+
+                    <RegistryKey Root='HKLM' Key='SOFTWARE\LightningView\Capabilities\FileAssociations'>
+                        <RegistryValue Name='.png' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.jpg' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.jpeg' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.bmp' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.gif' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.ico' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.jxl' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.pnm' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.svg' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.tiff' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.tif' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.tga' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.webp' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.xbm' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.xpm' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mrw' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.arw' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.srf' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.sr2' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mef' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.orf' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.srw' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.erf' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.kdc' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.dcs' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.rw2' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.raf' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.dcr' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.dng' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.pef' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.crw' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.iiq' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.3fr' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.nrw' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.nef' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mos' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.cr2' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.ari' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.ori' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.fit' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.fits' Value='LightningView.Image.1' Type='string' />
+                    </RegistryKey>
+                    
+                    <RegistryKey Root='HKLM' Key='SOFTWARE\RegisteredApplications'>
+                        <RegistryValue Name='LightningView' Value='SOFTWARE\LightningView\Capabilities' Type='string' />
+                    </RegistryKey>
+                    </Component>
+				
                 </Directory>
             </Directory>
         </Directory>
@@ -150,7 +329,7 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
-
+			
             <Feature
                 Id='Environment'
                 Title='PATH Environment Variable'
