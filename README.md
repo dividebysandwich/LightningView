@@ -78,6 +78,7 @@ General image formats:
 * GIF
 * ICO
 * JPEG
+* JPEG-XL
 * PNG
 * PNM
 * SVG

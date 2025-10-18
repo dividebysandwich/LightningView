@@ -6,6 +6,8 @@ use image::{codecs::gif::GifDecoder, imageops, AnimationDecoder, DynamicImage, I
 use ndarray::{s, Array, Array2, IxDyn};
 use rayon::prelude::*;
 use rustronomy_fits as rsf;
+use jxl_oxide::integration::JxlDecoder;
+use arboard::{Clipboard, ImageData};
 use std::{
     collections::HashMap,
     env,
@@ -14,6 +16,7 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     time::{Duration, Instant},
+    borrow::Cow,
 };
 
 #[cfg(target_os = "windows")]
@@ -30,6 +33,7 @@ pub const ANIM_SUPPORTED_FORMATS: [&str; 1] = ["gif"];
 pub const IMAGE_RS_SUPPORTED_FORMATS: [&str; 9] = ["jpg", "jpeg", "png", "bmp", "svg", "ico", "pnm", "xbm", "xpm"];
 pub const RAW_SUPPORTED_FORMATS: [&str; 24] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari", "ori"];
 pub const FITS_SUPPORTED_FORMATS: [&str; 2] = ["fits", "fit"];
+pub const JXL_SUPPORTED_FORMATS: [&str; 1] = ["jxl"];
 
 // --- Advanced Data Structures for Tiled Viewing ---
 struct DisplayableImage {
@@ -63,7 +67,7 @@ struct ImageViewerApp {
     is_randomized: bool,
     show_delete_confirmation: bool,
     last_error: Option<String>,
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Option<Clipboard>,
 }
 
 impl ImageViewerApp {
@@ -80,7 +84,7 @@ impl ImageViewerApp {
             is_randomized: false,
             show_delete_confirmation: false,
             last_error: None,
-            clipboard: arboard::Clipboard::new().ok(),
+            clipboard: Clipboard::new().ok(),
         };
         if let Some(path) = path {
             app.gather_images_from_directory(&path);
@@ -140,11 +144,20 @@ impl ImageViewerApp {
 
     fn copy_to_clipboard(&mut self) {
         if let (Some(clipboard), Some(image)) = (&mut self.clipboard, &self.image) {
-            let image_data = arboard::ImageData {
-                width: image.full_res_image.width(),
-                height: image.full_res_image.height(),
-                bytes: image.full_res_image.as_raw().into(),
+            let image = &image.full_res_image;
+
+            let rgba_bytes: Vec<u8> = image
+                .pixels
+                .iter()
+                .flat_map(|color| color.to_array())
+                .collect();
+
+            let image_data = ImageData {
+                width: image.width(),
+                height: image.height(),
+                bytes: Cow::from(rgba_bytes),
             };
+            log::info!("Copying image: {}x{}", image_data.width, image_data.height);
             if let Err(e) = clipboard.set_image(image_data) {
                 self.last_error = Some(format!("Failed to copy to clipboard: {}", e));
             } else {
@@ -168,6 +181,7 @@ impl ImageViewerApp {
             &IMAGE_RS_SUPPORTED_FORMATS[..],
             &RAW_SUPPORTED_FORMATS[..],
             &FITS_SUPPORTED_FORMATS[..],
+            &JXL_SUPPORTED_FORMATS[..],
         ]
         .concat();
 
@@ -219,6 +233,17 @@ impl ImageViewerApp {
     }
     
     fn handle_keyboard_input(&mut self, ctx: &egui::Context) {
+
+        let events = ctx.input(|i| i.events.clone());
+        // Iterate over all events that occurred this frame.
+        for event in &events {
+            // Pattern match to find the `Copy` event.
+            if let egui::Event::Copy = event {
+                log::info!("Copying image to clipboard...");
+                self.copy_to_clipboard();
+            }
+        }
+
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
             self.next_image(ctx);
         }
@@ -242,9 +267,6 @@ impl ImageViewerApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
             self.show_delete_confirmation = true;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.ctrl) {
-            self.copy_to_clipboard();
         }
     }
 }
@@ -480,15 +502,31 @@ fn load_image(path: &Path) -> Result<LoadedImage, String> {
         return Ok(LoadedImage::Static(first_frame));
     }
 
+    log::info!("Loading image: {}", path_str);
+    log::info!("Detected format based on extension: {}", extension);
+
     let dynamic_image = if RAW_SUPPORTED_FORMATS.contains(&extension.as_str()) {
         load_raw(&path_str)
     } else if FITS_SUPPORTED_FORMATS.contains(&extension.as_str()) {
         load_fits(&path_str)
+    } else if JXL_SUPPORTED_FORMATS.contains(&extension.as_str()) {
+        load_jxl(&path_str)
     } else {
         load_with_image_crate(&path_str)
     }?;
 
     Ok(LoadedImage::Static(to_egui_color_image(dynamic_image)))
+}
+
+fn load_jxl(path: &str) -> Result<DynamicImage, String> {
+    log::info!("Loading JXL: {}", path);
+    let file = fs::File::open(path).map_err(|e| format!("Failed to open JXL: {}", e))?;
+    let reader = BufReader::new(file);
+    let decoder = JxlDecoder::new(reader).map_err(|e| format!("Failed to create JXL decoder: {}", e))?;
+    let dynamic_image: DynamicImage = DynamicImage::from_decoder(decoder).map_err(|e| format!("Failed to decode JXL: {}", e))?;
+    log::info!("Loading image data: {}x{}", dynamic_image.width(), dynamic_image.height());
+
+    Ok(dynamic_image)
 }
 
 fn load_animated_gif_frames(path: &str) -> Result<Vec<(ColorImage, Duration)>, String> {

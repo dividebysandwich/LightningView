@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "2.2.1"
+version = "2.3.0"
 license = "GPLv2"
 edition = "2024"
 build = "build.rs"
@@ -10,18 +10,19 @@ repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
 const_format = "0.2"
-eframe = "0.32"
-egui = "0.32"
+eframe = "0.33"
+egui = "0.33"
 image = { version = "0.25" }
 rand = "0.9"
 log = "0.4"
 env_logger = "0.11"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 rustronomy-fits = "0.2"
-ndarray = "0.15.6"
+ndarray = "0.15"
 rawler = { git = "https://github.com/dividebysandwich/dnglab", rev="6b7cfeb8" }
 imagepipe = { git = "https://github.com/dividebysandwich/imagepipe", rev="cc9df677"}
 rayon = "1.11.0"
+jxl-oxide = { version = "0.12", features = ["image"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_UI_Shell"]}
@@ -40,7 +41,7 @@ codegen-units = 1
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "2.2.1"
+version = "2.3.0"
 license = "GPLv2"
 icon = ["logo_256.png"]
 copyright = "2025, the LightningView developers"
@@ -51,6 +52,7 @@ linux_exec_args = "%f"
 linux_mime_types = [
     "image/jpeg",
 	"image/jpg",
+	"image/jxl",
 	"image/pjpeg",
 	"image/png",
 	"image/apng",
