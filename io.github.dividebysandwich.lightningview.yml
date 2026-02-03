@@ -37,7 +37,7 @@ modules:
     
     build-commands:
       # Fetch and Build
-      - cargo --offline fetch --manifest-path Cargo.toml
+      # - cargo --offline fetch --manifest-path Cargo.toml
       - cargo --offline build --release --manifest-path Cargo.toml
       
       # Install Binary
