@@ -75,9 +75,6 @@ jobs:
           echo '[source."https://github.com/dividebysandwich/imagepipe"]' >> .cargo/config.toml
           echo 'git = "https://github.com/dividebysandwich/imagepipe"' >> .cargo/config.toml
           echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
-          
-          # Remove lockfile to prevent "requires lock file" error
-          rm Cargo.lock
 
       - name: Build Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
