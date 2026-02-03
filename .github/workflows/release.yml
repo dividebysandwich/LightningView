@@ -61,6 +61,10 @@ jobs:
       - name: Vendor Dependencies
         run: |
           mkdir -p .cargo
+
+          rm Cargo.lock
+          cargo generate-lockfile
+          
           # Standard vendor for crates.io dependencies
           cargo vendor > .cargo/config.toml
           
