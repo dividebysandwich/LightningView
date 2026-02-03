@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "2.4.1"
+version = "2.4.2"
 license = "GPLv2"
 edition = "2024"
 build = "build.rs"
@@ -41,10 +41,10 @@ codegen-units = 1
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "2.4.1"
+version = "2.4.2"
 license = "GPLv2"
 icon = ["logo_256.png"]
-copyright = "2025, the LightningView developers"
+copyright = "2025-2026, the LightningView developers"
 category = "Graphics and Design"
 short_description = "A fast image viewer"
 long_description = "LightningView is a fast image viewer that supports a wide range of image formats. It is designed to be fast and responsive, with a minimal interface that gets out of your way. LightningView is perfect for quickly viewing and sorting through large collections of images."

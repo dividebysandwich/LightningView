@@ -62,6 +62,7 @@ struct ImageViewerApp {
     image_order: Vec<usize>,
     zoom: f32,
     offset: Vec2,
+    velocity: Vec2,
     is_scaled_to_fit: bool,
     is_fullscreen: bool,
     is_randomized: bool,
@@ -79,6 +80,7 @@ impl ImageViewerApp {
             image_order: Vec::new(),
             zoom: 1.0,
             offset: Vec2::ZERO,
+            velocity: Vec2::ZERO,
             is_scaled_to_fit: true,
             is_fullscreen: initial_fullscreen,
             is_randomized: false,
@@ -290,6 +292,7 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
                 let full_res_size = Vec2::new(image.full_res_image.width() as f32, image.full_res_image.height() as f32);
 
+                // Handle Scale to Fit
                 if self.is_scaled_to_fit {
                     let aspect_ratio = full_res_size.x / full_res_size.y;
                     let available_aspect = available_rect.width() / available_rect.height();
@@ -301,12 +304,26 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
                     }
                     self.zoom = fit_size.x / full_res_size.x;
                     self.offset = (available_rect.size() - fit_size) / 2.0;
+                        
+                    // Kill velocity when in fit mode
+                    self.velocity = Vec2::ZERO; 
                 }
+    
+                let mut is_interacting = false;
 
+                // Handle Dragging & Inertia
                 if response.dragged_by(egui::PointerButton::Primary) {
-                    self.offset += response.drag_delta();
+                    let delta = response.drag_delta();
+                    self.offset += delta;
+                    self.velocity = delta; // Capture momentum
                     self.is_scaled_to_fit = false;
+                    is_interacting = true;
+                } else {
+                    // Apply velocity to position first (let it slide)
+                    self.offset += self.velocity;
                 }
+    
+                // Handle Zooming
                 if let Some(hover_pos) = response.hover_pos() {
                     let scroll = ui.input(|i| i.raw_scroll_delta.y);
                     if scroll != 0.0 {
@@ -316,7 +333,74 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
                         let image_coords = (hover_pos - available_rect.min - self.offset) / old_zoom;
                         self.offset -= image_coords * (self.zoom - old_zoom);
                         self.is_scaled_to_fit = false;
+                        self.velocity = Vec2::ZERO;
+                        is_interacting = true;
                     }
+                }
+    
+                // Bouncing & Constraints
+                if !self.is_scaled_to_fit && !is_interacting {
+                    let screen_size = available_rect.size();
+                    let scaled_image_size = full_res_size * self.zoom;
+
+                    let friction = 0.92;    // Slipperyness on valid surface (0.0 - 1.0)
+                    let tension = 0.06;     // Spring stiffness (strength of snap back)
+                    let damping = 0.65;     // Spring damping (prevents endless bouncing)
+
+                    // Helper closure for axis physics
+                    let handle_axis = |offset: &mut f32, velocity: &mut f32, view_dim: f32, img_dim: f32| {
+                        let target_pos;
+                        let is_out_of_bounds;
+
+                        if img_dim <= view_dim {
+                            // If image is smaller than screen, target is the center
+                            target_pos = (view_dim - img_dim) / 2.0;
+                            // Consider it "out of bounds" if it's not centered
+                            is_out_of_bounds = (*offset - target_pos).abs() > 0.5;
+                        } else {
+                            // If image is larger, check edges
+                            let min = view_dim - img_dim; // Far right/bottom edge
+                            let max = 0.0;                // Far left/top edge
+
+                            if *offset > max {
+                                target_pos = max;
+                                is_out_of_bounds = true;
+                            } else if *offset < min {
+                                target_pos = min;
+                                is_out_of_bounds = true;
+                            } else {
+                                target_pos = *offset; // No target, effectively
+                                is_out_of_bounds = false;
+                            }
+                        }
+
+                        if is_out_of_bounds {
+                            // Apply spring force toward target
+                            let displacement = target_pos - *offset;
+                            *velocity += displacement * tension; // Accelerate towards edge
+                            *velocity *= damping;                // Slow down (dampen oscillation)
+                        } else {
+                            // Standard friction when inside bounds
+                            *velocity *= friction;
+                        }
+                    };
+
+                    handle_axis(&mut self.offset.x, &mut self.velocity.x, screen_size.x, scaled_image_size.x);
+                    handle_axis(&mut self.offset.y, &mut self.velocity.y, screen_size.y, scaled_image_size.y);
+
+                    // Stop simulation if movement is negligible to save CPU
+                    if self.velocity.length_sq() > 0.01 {
+                        ctx.request_repaint();
+                    } else {
+                        self.velocity = Vec2::ZERO;
+                    }
+                }
+
+                // We keep repainting as long as the image is moving significantly
+                if self.velocity.length_sq() > 0.1 {
+                    ctx.request_repaint();
+                } else {
+                    self.velocity = Vec2::ZERO;
                 }
 
                 let preview_size = image.preview_texture.size_vec2();
