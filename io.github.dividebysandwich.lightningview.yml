@@ -1,4 +1,4 @@
-app-id: com.lightningview
+app-id: io.github.dividebysandwich.lightningview
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
