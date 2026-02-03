@@ -1,80 +1,283 @@
+name: Rust
+
 on:
-  release:
-    types: [released, workflow_dispatch]
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Name matches package.name in Cargo.toml
+  NAME: lightningview
+  # Bundle name matches package.metadata.bundle.name
+  BUNDLE_NAME: LightningView
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  release-windows:
-    name: release ${{ matrix.target }}
+  test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-gnu
-            archive: zip
     steps:
-      - uses: actions/checkout@v4.1.1
-      - name: Checkout dnglab
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: dividebysandwich/dnglab
-          path: dnglab
-      - name: Checkout imagepipe
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: dividebysandwich/imagepipe
-          path: imagepipe
+      - uses: actions/checkout@v4
       
-      - name: Compile and release windows
-        uses: rust-build/rust-build.action@v1.4.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          RUSTTARGET: ${{ matrix.target }}
-          ARCHIVE_TYPES: ${{ matrix.archive }}
+      # Install GUI dependencies for eframe/egui and clipboard support
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev
 
-  release-linux:
-    name: release ${{ matrix.target }}
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ./target
+          key: test-cargo-registry-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run tests
+        # Git dependencies (crawler/imagepipe) are handled automatically by cargo
+        run: cargo test --verbose
+
+  flatpak:
+    name: Build Linux Flatpak
+    needs: test
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Flatpak Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder elfutils
+          sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Sdk//24.08 \
+                                          org.freedesktop.Platform//24.08 \
+                                          org.freedesktop.Sdk.Extension.rust-stable//24.08 \
+                                          org.freedesktop.Sdk.Extension.llvm18//24.08
+
+      - name: Vendor Dependencies
+        run: |
+          mkdir -p .cargo
+          cargo vendor > .cargo/config.toml
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: com.lightningview.flatpak
+          # ASSUMPTION: You have a flatpak manifest with this name in your repo
+          manifest-path: com.lightningview.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Upload Flatpak Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-bundle
+          path: com.lightningview.flatpak
+
+  build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            archive: zip
+          - TARGET: x86_64-unknown-linux-gnu 
+            OS: ubuntu-latest
+          - TARGET: x86_64-apple-darwin
+            OS: macos-latest
+          - TARGET: aarch64-apple-darwin
+            OS: macos-latest
+          - TARGET: x86_64-pc-windows-msvc
+            OS: windows-latest
+    needs: test
+    runs-on: ${{ matrix.OS }}
+    env:
+      TARGET: ${{ matrix.TARGET }}
+      OS: ${{ matrix.OS }}
     steps:
-      - uses: actions/checkout@v4.1.1
-      - name: Checkout dnglab
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: dividebysandwich/dnglab
-          path: dnglab
-      - name: Checkout imagepipe
-        uses: actions/checkout@v4.1.1
-        with:
-          repository: dividebysandwich/imagepipe
-          path: imagepipe
-      - name: Update packages
-        run: sudo apt-get update
-      - name: Install libraries
-        shell: bash
-        run: sudo apt-get install --fix-missing libx11-dev libcairo-dev libxcursor-dev libxfixes-dev libxinerama-dev libxft-dev libpango1.0-dev libstdc++-11-dev
-      - name: Compile linux
-        uses: actions-rs/cargo@v1.0.1
-        with:
-          use-cross: false
-          command: build
-          args: --release --target ${{ matrix.target }}
-      - name: Package
-        shell: bash
+      - uses: actions/checkout@v4
+
+      - name: Calculate Cargo hash
+        id: cargo-hash
         run: |
-          cd target/${{ matrix.target }}/release          
-          tar czvf ../../../lightningview-${{ matrix.target }}.tar.gz lightningview
-          cd -
-      - name: Publish
-        uses: softprops/action-gh-release@v1
-        # TODO: if any of the build step fails, the release should be deleted.
+          if command -v sha256sum > /dev/null; then
+            echo "hash=$(sha256sum Cargo.lock | awk '{print $1}')" >> $GITHUB_OUTPUT
+          else
+            echo "hash=$(shasum -a 256 Cargo.lock | awk '{print $1}')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Cargo cache
+        uses: actions/cache@v4
         with:
-            files: 'lightningview*'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          path: |
+            ~/.cargo/registry
+            ./target
+          key: build-cargo-registry-${{ matrix.TARGET }}-${{ steps.cargo-hash.outputs.hash }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev
+
+      - name: Install rust target
+        run: rustup target add $TARGET
+        
+      - name: Install cargo-bundle
+        if: runner.os == 'macOS'
+        run: cargo install cargo-bundle
+
+      - name: Run build (Linux/Windows)
+        if: runner.os != 'macOS'
+        run: cargo build --release --verbose --target $TARGET
+
+      - name: Run bundle (macOS)
+        if: runner.os == 'macOS'
+        run: cargo bundle --release --target $TARGET
+
+      - name: Install zip (Windows)
+        if: runner.os == 'Windows'
+        run: choco install zip
+        
+      - name: Compress
+        run: |
+          mkdir -p ./artifacts
+          if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
+            TAG=$GITHUB_REF_NAME
+          else
+            TAG=$GITHUB_SHA
+          fi
+
+          # Windows
+          if [[ $OS =~ ^windows.*$ ]]; then
+              EXEC=$NAME.exe
+              mv ./target/$TARGET/release/$EXEC ./$EXEC
+              zip ./artifacts/$NAME-$TARGET-$TAG.zip $EXEC README.md LICENSE
+          
+          # MacOS
+          elif [[ $OS =~ ^macos.*$ ]]; then
+              # cargo-bundle outputs to target/release/bundle/osx/
+              # The folder name here relies on [package.metadata.bundle] name = "LightningView"
+              APP_DIR="./target/$TARGET/release/bundle/osx"
+              
+              # Find the .app directory name automatically to be safe
+              APP_NAME_WITH_EXT=$(find "$APP_DIR" -name "*.app" -maxdepth 1 -exec basename {} \;)
+
+              if [ -z "$APP_NAME_WITH_EXT" ]; then
+                  echo "Error: No .app directory found in $APP_DIR"
+                  exit 1
+              fi
+              
+              echo "Zipping app: $APP_NAME_WITH_EXT"
+              
+              # Copy aux files into .app parent dir for zipping
+              cp ./README.md "$APP_DIR/" || true
+              cp ./LICENSE "$APP_DIR/" || true
+              
+              (cd "$APP_DIR" && zip -r -q "../../../../../artifacts/$NAME-$TARGET-$TAG.zip" "$APP_NAME_WITH_EXT" README.md LICENSE)
+          # Linux
+          else
+              EXEC=$NAME
+              mv ./target/$TARGET/release/$EXEC ./$EXEC
+              tar -czf ./artifacts/$NAME-$TARGET-$TAG.tar.gz $EXEC README.md LICENSE
+          fi
+          
+      - name: Archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.TARGET }}
+          path: |
+            ./artifacts
+
+  build-msi:
+    name: Build Windows MSI
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ./target
+          key: msi-cargo-registry-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Build MSI
+        run: |
+          # If wix/main.wxs does not exist, init it
+          if [ ! -d "wix" ]; then
+            echo "Wix configuration not found, initializing defaults..."
+            cargo wix init
+          fi
+          # Git deps are handled automatically
+          cargo wix --nocapture
+
+      - name: Archive MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-msi
+          path: target/wix/*.msi
+
+  build-deb:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ./target
+          key: deb-cargo-registry-${{ hashFiles('Cargo.lock') }}
+      
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build Debian package
+        run: cargo deb
+
+      - name: Archive Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-deb
+          path: target/debian/*.deb
+
+  deploy:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [flatpak, build, build-deb, build-msi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+      
+      - name: Rename Flatpak
+        run: |
+          VERSION=${{ github.ref_name }}
+          # Ensure this path matches the name defined in the flatpak job
+          mv ./artifacts/flatpak-bundle/com.lightningview.flatpak ./lightningview-${VERSION}-x86_64.flatpak
+      
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+           files: |
+            ./artifacts/*/*.tar.gz
+            ./artifacts/*/*.zip
+            ./artifacts/*/*.deb
+            ./artifacts/*/*.msi
+            ./*.flatpak

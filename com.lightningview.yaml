@@ -1,0 +1,56 @@
+app-id: com.lightningview
+runtime: org.freedesktop.Platform
+# Matches the version in your previous workflow
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+
+command: lightningview
+
+finish-args:
+  # --- GUI / Display ---
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --share=ipc
+  
+  # --- File Access ---
+  # Essential for an image viewer to open files passed as arguments 
+  # from anywhere on the system (e.g. "Open With").
+  - --filesystem=host
+
+  # --- System Integration ---
+  # Read system theme/settings (helps eframe/egui look correct)
+  - --filesystem=xdg-run/dconf
+  - --config=dconf
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+
+modules:
+  - name: lightningview
+    buildsystem: simple
+    build-options:
+      env:
+        # Ensures cargo uses the vendored sources provided by the builder
+        CARGO_HOME: .cargo
+    
+    build-commands:
+      # Fetch and Build
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release --manifest-path Cargo.toml
+      
+      # Install Binary
+      - install -D target/release/lightningview /app/bin/lightningview
+      
+      # Install Icon (Using the file from your Cargo.toml)
+      - install -D -m 644 logo_256.png /app/share/icons/hicolor/256x256/apps/com.lightningview.png
+      
+      # Install Desktop File
+      # Note: You must ensure this file exists in your repo (see below)
+      - install -D -m 644 com.lightningview.desktop /app/share/applications/com.lightningview.desktop
+
+    sources:
+      - type: dir
+        path: .
