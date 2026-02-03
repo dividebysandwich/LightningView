@@ -1,7 +1,6 @@
 app-id: com.lightningview
 runtime: org.freedesktop.Platform
-# Matches the version in your previous workflow
-runtime-version: '25.08'
+runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -44,11 +43,10 @@ modules:
       # Install Binary
       - install -D target/release/lightningview /app/bin/lightningview
       
-      # Install Icon (Using the file from your Cargo.toml)
+      # Install Icon
       - install -D -m 644 logo_256.png /app/share/icons/hicolor/256x256/apps/com.lightningview.png
       
       # Install Desktop File
-      # Note: You must ensure this file exists in your repo (see below)
       - install -D -m 644 com.lightningview.desktop /app/share/applications/com.lightningview.desktop
 
     sources:
