@@ -61,7 +61,20 @@ jobs:
       - name: Vendor Dependencies
         run: |
           mkdir -p .cargo
+          # Standard vendor for crates.io dependencies
           cargo vendor > .cargo/config.toml
+          
+          # Manual override for the 'rawler' (dnglab) git dependency
+          echo "" >> .cargo/config.toml
+          echo '[source."https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"]' >> .cargo/config.toml
+          echo 'git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"' >> .cargo/config.toml
+          echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
+
+          # Manual override for the 'imagepipe' git dependency
+          echo "" >> .cargo/config.toml
+          echo '[source."https://github.com/dividebysandwich/imagepipe"]' >> .cargo/config.toml
+          echo 'git = "https://github.com/dividebysandwich/imagepipe"' >> .cargo/config.toml
+          echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
 
       - name: Build Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
