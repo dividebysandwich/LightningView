@@ -651,7 +651,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         println!("Usage: {} [/windowed] <imagefile>", args[0]);
-        println!("Or for Windows registry: {} /register | /unregister", args[0]);
         return Ok(());
     }
     

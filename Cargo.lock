@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "lightningview"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "arboard",
  "const_format",
@@ -3565,7 +3565,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 [[package]]
 name = "rawler"
 version = "0.7.1"
-source = "git+https://github.com/dividebysandwich/dnglab.git?diamond_fix=1?rev=6b7cfeb8#6b7cfeb87c33c9839b381e40f610ee6262b1fdf5"
+source = "git+https://github.com/dividebysandwich/dnglab.git?diamond_fix=1?rev=c94bde3#c94bde31c1fe1ba18c76350924ff9d583eab7ab4"
 dependencies = [
  "backtrace",
  "bitstream-io",
