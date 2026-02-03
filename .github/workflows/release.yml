@@ -66,16 +66,16 @@ jobs:
       - name: Build Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
-          bundle: com.lightningview.flatpak
+          bundle: io.github.dividebysandwich.lightningview.flatpak
           # ASSUMPTION: You have a flatpak manifest with this name in your repo
-          manifest-path: com.lightningview.yml
+          manifest-path: io.github.dividebysandwich.lightningview.yml
           cache-key: flatpak-builder-${{ github.sha }}
 
       - name: Upload Flatpak Bundle
         uses: actions/upload-artifact@v4
         with:
           name: flatpak-bundle
-          path: com.lightningview.flatpak
+          path: io.github.dividebysandwich.lightningview.flatpak
 
   build:
     strategy:
@@ -271,7 +271,7 @@ jobs:
         run: |
           VERSION=${{ github.ref_name }}
           # Ensure this path matches the name defined in the flatpak job
-          mv ./artifacts/flatpak-bundle/com.lightningview.flatpak ./lightningview-${VERSION}-x86_64.flatpak
+          mv ./artifacts/flatpak-bundle/io.github.dividebysandwich.lightningview.flatpak ./lightningview-${VERSION}-x86_64.flatpak
       
       - name: Release
         uses: softprops/action-gh-release@v1
