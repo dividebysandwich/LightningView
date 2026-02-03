@@ -75,12 +75,14 @@ jobs:
           echo '[source."https://github.com/dividebysandwich/imagepipe"]' >> .cargo/config.toml
           echo 'git = "https://github.com/dividebysandwich/imagepipe"' >> .cargo/config.toml
           echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
+          
+          # Remove lockfile to prevent "requires lock file" error
+          rm Cargo.lock
 
       - name: Build Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: io.github.dividebysandwich.lightningview.flatpak
-          # ASSUMPTION: You have a flatpak manifest with this name in your repo
           manifest-path: io.github.dividebysandwich.lightningview.yml
           cache-key: flatpak-builder-${{ github.sha }}
 
