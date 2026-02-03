@@ -40,59 +40,57 @@ jobs:
         # Git dependencies (crawler/imagepipe) are handled automatically by cargo
         run: cargo test --verbose
 
-  flatpak:
-    name: Build Linux Flatpak
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Flatpak Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder elfutils
-          sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y flathub org.freedesktop.Sdk//24.08 \
-                                          org.freedesktop.Platform//24.08 \
-                                          org.freedesktop.Sdk.Extension.rust-stable//24.08 \
-                                          org.freedesktop.Sdk.Extension.llvm18//24.08
-
-      - name: Vendor Dependencies
-        run: |
-          mkdir -p .cargo
-
-          rm Cargo.lock
-          cargo generate-lockfile
-          
-          # Standard vendor for crates.io dependencies
-          cargo vendor > .cargo/config.toml
-          
-          # Manual override for the 'rawler' (dnglab) git dependency
-          echo "" >> .cargo/config.toml
-          echo '[source."https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"]' >> .cargo/config.toml
-          echo 'git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"' >> .cargo/config.toml
-          echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
-
-          # Manual override for the 'imagepipe' git dependency
-          echo "" >> .cargo/config.toml
-          echo '[source."https://github.com/dividebysandwich/imagepipe"]' >> .cargo/config.toml
-          echo 'git = "https://github.com/dividebysandwich/imagepipe"' >> .cargo/config.toml
-          echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
-
-      - name: Build Flatpak
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: io.github.dividebysandwich.lightningview.flatpak
-          manifest-path: io.github.dividebysandwich.lightningview.yml
-          cache-key: flatpak-builder-${{ github.sha }}
-
-      - name: Upload Flatpak Bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: flatpak-bundle
-          path: io.github.dividebysandwich.lightningview.flatpak
-
+#  flatpak:
+#    name: Build Linux Flatpak
+#    needs: test
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: Checkout code
+#        uses: actions/checkout@v4
+#
+#      - name: Install Flatpak Dependencies
+#        run: |
+#          sudo apt-get update
+#          sudo apt-get install -y flatpak flatpak-builder elfutils
+#          sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+#          sudo flatpak install -y flathub org.freedesktop.Sdk//24.08 \
+#                                          org.freedesktop.Platform//24.08 \
+#                                          org.freedesktop.Sdk.Extension.rust-stable//24.08 \
+#                                          org.freedesktop.Sdk.Extension.llvm18//24.08
+#      - name: Vendor Dependencies
+#        run: |
+#          mkdir -p .cargo
+#
+#          rm Cargo.lock
+#          cargo generate-lockfile
+#
+#          # Standard vendor for crates.io dependencies
+#          cargo vendor > .cargo/config.toml
+#          
+#          # Manual override for the 'rawler' (dnglab) git dependency
+#          echo "" >> .cargo/config.toml
+#          echo '[source."https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"]' >> .cargo/config.toml
+#          echo 'git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"' >> .cargo/config.toml
+#          echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
+#
+#          # Manual override for the 'imagepipe' git dependency
+#          echo "" >> .cargo/config.toml
+#          echo '[source."https://github.com/dividebysandwich/imagepipe"]' >> .cargo/config.toml
+#          echo 'git = "https://github.com/dividebysandwich/imagepipe"' >> .cargo/config.toml
+#          echo 'replace-with = "vendored-sources"' >> .cargo/config.toml
+#
+#      - name: Build Flatpak
+#        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+#        with:
+#          bundle: io.github.dividebysandwich.lightningview.flatpak
+#          manifest-path: io.github.dividebysandwich.lightningview.yml
+#          cache-key: flatpak-builder-${{ github.sha }}
+#
+#      - name: Upload Flatpak Bundle
+#        uses: actions/upload-artifact@v4
+#        with:
+#          name: flatpak-bundle
+#          path: io.github.dividebysandwich.lightningview.flatpak
   build:
     strategy:
       fail-fast: false
@@ -273,7 +271,7 @@ jobs:
 
   deploy:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [flatpak, build, build-deb, build-msi]
+    needs: [build, build-deb, build-msi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -283,11 +281,10 @@ jobs:
         with:
           path: ./artifacts
       
-      - name: Rename Flatpak
-        run: |
-          VERSION=${{ github.ref_name }}
-          # Ensure this path matches the name defined in the flatpak job
-          mv ./artifacts/flatpak-bundle/io.github.dividebysandwich.lightningview.flatpak ./lightningview-${VERSION}-x86_64.flatpak
+#      - name: Rename Flatpak
+#        run: |
+#          VERSION=${{ github.ref_name }}
+#          mv ./artifacts/flatpak-bundle/io.github.dividebysandwich.lightningview.flatpak ./lightningview-${VERSION}-x86_64.flatpak
       
       - name: Release
         uses: softprops/action-gh-release@v1
@@ -297,4 +294,4 @@ jobs:
             ./artifacts/*/*.zip
             ./artifacts/*/*.deb
             ./artifacts/*/*.msi
-            ./*.flatpak
+#            ./*.flatpak
