@@ -19,7 +19,7 @@ env_logger = "0.11"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 rustronomy-fits = "0.2"
 ndarray = "0.15"
-rawler = { git = "https://github.com/dividebysandwich/dnglab", rev="6b7cfeb8" }
+rawler = { git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1", rev="6b7cfeb8" }
 imagepipe = { git = "https://github.com/dividebysandwich/imagepipe", rev="cc9df677"}
 rayon = "1.11.0"
 jxl-oxide = { version = "0.12", features = ["image"] }
@@ -95,3 +95,6 @@ linux_mime_types = [
     "image/x-panasonic-rw2",
 	"application/fits"
 ]
+
+[patch."https://github.com/dividebysandwich/dnglab"]
+rawler = { git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1", rev = "6b7cfeb8" }
