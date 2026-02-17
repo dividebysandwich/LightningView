@@ -508,7 +508,7 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
                         if self.is_randomized {
                             let current_image_index = self.image_order[self.current_index];
                             #[allow(deprecated)]
-                            let mut rng = rand::thread_rng();
+                            let mut rng = rand::rng();
                             use rand::seq::SliceRandom;
                             self.image_order.shuffle(&mut rng);
                             if let Some(pos) = self.image_order.iter().position(|&i| i == current_image_index) {

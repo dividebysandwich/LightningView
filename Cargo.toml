@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "2.4.2"
+version = "2.4.3"
 license = "GPLv2"
 edition = "2024"
 build = "build.rs"
@@ -13,13 +13,13 @@ const_format = "0.2"
 eframe = "0.33"
 egui = "0.33"
 image = { version = "0.25" }
-rand = "0.9"
+rand = "0.10"
 log = "0.4"
 env_logger = "0.11"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 rustronomy-fits = "0.2"
 ndarray = "0.15"
-rawler = { git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1", rev="c94bde3" }
+rawler = { git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1", rev="513b360" }
 imagepipe = { git = "https://github.com/dividebysandwich/imagepipe", rev="cc9df677"}
 rayon = "1.11.0"
 jxl-oxide = { version = "0.12", features = ["image"] }
@@ -41,7 +41,7 @@ codegen-units = 1
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "2.4.2"
+version = "2.4.3"
 license = "GPLv2"
 icon = ["logo_256.png"]
 copyright = "2025-2026, the LightningView developers"
