@@ -315,23 +315,23 @@ jobs:
         env:
           # GitHub Actions runners do not always allow FUSE; extract and run instead.
           APPIMAGE_EXTRACT_AND_RUN: "1"
-          # Embeds the version into the output file name.
-          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
-          OUTPUT: LightningView-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}-x86_64.AppImage
+          # The appimage plugin uses LDAI_OUTPUT (newer) / OUTPUT (deprecated)
+          # to set the resulting filename directly — no post-rename needed.
+          LDAI_OUTPUT: LightningView-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}-x86_64.AppImage
         run: |
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --desktop-file AppDir/usr/share/applications/lightningview.desktop \
             --icon-file AppDir/lightningview.png \
             --output appimage
-          # linuxdeploy names its output based on the desktop entry; rename to a stable name.
-          mv LightningView-*.AppImage "$OUTPUT" 2>/dev/null || mv ./*.AppImage "$OUTPUT"
 
       - name: Archive AppImage
         uses: actions/upload-artifact@v4
         with:
           name: result-appimage
-          path: ./*.AppImage
+          # Match only LightningView-prefixed AppImages so the linuxdeploy
+          # tool itself does not end up in the artifact.
+          path: ./LightningView-*.AppImage
 
   build-chocolatey:
     name: Build Chocolatey package
@@ -405,10 +405,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder elfutils
           sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y flathub org.freedesktop.Sdk//24.08 \
-                                          org.freedesktop.Platform//24.08 \
-                                          org.freedesktop.Sdk.Extension.rust-stable//24.08 \
-                                          org.freedesktop.Sdk.Extension.llvm18//24.08
+          # 25.08 is required because rust-stable//24.08 ships rustc 1.89,
+          # which is below egui 0.34's 1.92 MSRV. 25.08 ships rustc 1.94.
+          sudo flatpak install -y flathub org.freedesktop.Sdk//25.08 \
+                                          org.freedesktop.Platform//25.08 \
+                                          org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+                                          org.freedesktop.Sdk.Extension.llvm20//25.08
 
       - name: Vendor Cargo dependencies
         run: |

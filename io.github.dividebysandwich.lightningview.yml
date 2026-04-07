@@ -1,10 +1,14 @@
 app-id: io.github.dividebysandwich.lightningview
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+# 25.08 ships rustc 1.94 in the rust-stable extension, which satisfies the
+# >=1.92 MSRV that egui 0.34 requires. 24.08 only had rust 1.89 and the build
+# would fail with "rustc 1.89.0 is not supported by ecolor/eframe/egui/...".
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-  - org.freedesktop.Sdk.Extension.llvm18
+  # llvm18 is not published for 25.08; the available branches are llvm20/llvm21.
+  - org.freedesktop.Sdk.Extension.llvm20
 
 command: lightningview
 
@@ -26,8 +30,8 @@ finish-args:
   - --config=dconf
 
 build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm18/bin
-  prepend-ld-library-path: /usr/lib/sdk/llvm18/lib
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm20/lib
   env:
     # Use the in-tree .cargo/config.toml + vendor/ that the CI step prepared.
     CARGO_HOME: .cargo
