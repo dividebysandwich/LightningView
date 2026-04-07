@@ -274,18 +274,19 @@ impl ImageViewerApp {
 }
 
 impl eframe::App for ImageViewerApp {
-    
-fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+
+fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    let ctx = ui.ctx().clone();
     let is_currently_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if self.is_fullscreen != is_currently_fullscreen {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
     }
 
-    self.handle_keyboard_input(ctx);
+    self.handle_keyboard_input(&ctx);
 
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             if let Some(image) = &mut self.image {
                 let available_rect = ui.available_rect_before_wrap();
                 let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
@@ -325,7 +326,7 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
     
                 // Handle Zooming
                 if let Some(hover_pos) = response.hover_pos() {
-                    let scroll = ui.input(|i| i.raw_scroll_delta.y);
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                     if scroll != 0.0 {
                         let old_zoom = self.zoom;
                         let zoom_delta = (scroll / 200.0) * self.zoom;
@@ -538,7 +539,7 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
+            .show(&ctx, |ui| {
                 if let Some(path) = &path {
                 ui.label(format!("Are you sure you want to delete '{}'?", path.display()));
                 ui.add_space(10.0);
@@ -562,7 +563,7 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             } else {
                                 self.current_index %= self.image_files.len();
-                                self.load_image_at_index(self.current_index, ctx);
+                                self.load_image_at_index(self.current_index, &ctx);
                             }
                         }
                         self.show_delete_confirmation = false;

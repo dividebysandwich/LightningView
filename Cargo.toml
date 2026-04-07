@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "2.4.5"
+version = "2.4.6"
 license = "GPLv2"
 edition = "2024"
 build = "build.rs"
@@ -10,13 +10,13 @@ repository = "https://github.com/dividebysandwich/LightningView"
 
 [dependencies]
 const_format = "0.2"
-eframe = "0.33"
-egui = "0.33"
-image = { version = "0.25" }
+eframe = "0.34.1"
+egui = "0.34.1"
+image = { version = "0.25.10" }
 rand = "0.10"
 log = "0.4"
-env_logger = "0.11"
-arboard = { version = "3.6", features = ["wayland-data-control"] }
+env_logger = "0.11.10"
+arboard = { version = "3.2.1", features = ["wayland-data-control"] }
 rustronomy-fits = "0.2"
 ndarray = "0.15"
 rawler = { git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1", rev="83351fd" }
@@ -26,7 +26,7 @@ jxl-oxide = { version = "0.12", features = ["image"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_UI_Shell"]}
-winreg = "0.55"
+winreg = "0.56.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
