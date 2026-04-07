@@ -412,25 +412,17 @@ jobs:
 
       - name: Vendor Cargo dependencies
         run: |
-          mkdir -p .cargo
-          # Re-resolve so the lockfile reflects the current Cargo.toml
+          # Re-resolve so the lockfile reflects the current Cargo.toml.
           rm -f Cargo.lock
           cargo generate-lockfile
 
-          # Vendor crates.io dependencies into ./vendor and write the redirect
-          cargo vendor > .cargo/config.toml
-
-          # Manual override for the 'rawler' (dnglab) git dependency
-          cat >> .cargo/config.toml <<'EOF'
-
-          [source."https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"]
-          git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"
-          replace-with = "vendored-sources"
-
-          [source."https://github.com/dividebysandwich/imagepipe"]
-          git = "https://github.com/dividebysandwich/imagepipe"
-          replace-with = "vendored-sources"
-          EOF
+          # `cargo vendor` writes the correct source-replacement config for
+          # crates.io AND every git dep (including the two rawler revs) to
+          # stdout. Don't append anything else — that's what broke the build
+          # before. stderr carries progress messages and must NOT go into
+          # config.toml.
+          mkdir -p .cargo
+          cargo vendor > .cargo/config.toml 2>/dev/null
 
       - name: Build Flatpak
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6

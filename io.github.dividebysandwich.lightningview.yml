@@ -4,6 +4,7 @@ runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm18
 
 command: lightningview
 
@@ -13,9 +14,9 @@ finish-args:
   - --socket=wayland
   - --device=dri
   - --share=ipc
-  
+
   # --- File Access ---
-  # Essential for an image viewer to open files passed as arguments 
+  # Essential for an image viewer to open files passed as arguments
   # from anywhere on the system (e.g. "Open With").
   - --filesystem=host
 
@@ -25,29 +26,29 @@ finish-args:
   - --config=dconf
 
 build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm18/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm18/lib
+  env:
+    # Use the in-tree .cargo/config.toml + vendor/ that the CI step prepared.
+    CARGO_HOME: .cargo
 
 modules:
   - name: lightningview
     buildsystem: simple
-    build-options:
-      env:
-        # Ensures cargo uses the vendored sources provided by the builder
-        CARGO_HOME: .cargo
-    
+
     build-commands:
-      # Fetch and Build
-      # - cargo --offline fetch --manifest-path Cargo.toml
-      - cargo --offline build --release --manifest-path Cargo.toml
-      
+      # Build offline against the vendored sources copied in via `type: dir`.
+      - cargo --offline build --release --verbose --manifest-path Cargo.toml
+
       # Install Binary
-      - install -D target/release/lightningview /app/bin/lightningview
-      
-      # Install Icon
-      - install -D -m 644 logo_256.png /app/share/icons/hicolor/256x256/apps/com.lightningview.png
-      
-      # Install Desktop File
-      - install -D -m 644 com.lightningview.desktop /app/share/applications/com.lightningview.desktop
+      - install -Dm755 target/release/lightningview /app/bin/lightningview
+
+      # Install Icon (Flathub requires the file to be prefixed with the app id)
+      - install -Dm644 lightningview.png /app/share/icons/hicolor/256x256/apps/io.github.dividebysandwich.lightningview.png
+
+      # Install Desktop File (Flathub requires the file to be prefixed with the app id)
+      - install -Dm644 lightningview.desktop /app/share/applications/io.github.dividebysandwich.lightningview.desktop
+      - desktop-file-edit --set-icon=io.github.dividebysandwich.lightningview /app/share/applications/io.github.dividebysandwich.lightningview.desktop
 
     sources:
       - type: dir
