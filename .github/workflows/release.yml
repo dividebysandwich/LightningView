@@ -256,7 +256,7 @@ jobs:
             ~/.cargo/registry
             ./target
           key: deb-cargo-registry-${{ hashFiles('Cargo.lock') }}
-      
+
       - name: Install cargo-deb
         run: cargo install cargo-deb
 
@@ -269,9 +269,185 @@ jobs:
           name: result-deb
           path: target/debian/*.deb
 
+  build-appimage:
+    name: Build Linux AppImage
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev fuse libfuse2 desktop-file-utils
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ./target
+          key: appimage-cargo-registry-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --verbose
+
+      - name: Stage AppDir
+        run: |
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
+          install -m 755 target/release/lightningview AppDir/usr/bin/lightningview
+          install -m 644 lightningview.desktop AppDir/usr/share/applications/lightningview.desktop
+          install -m 644 lightningview.png AppDir/usr/share/icons/hicolor/256x256/apps/lightningview.png
+
+          # Top-level icon + .desktop are required by AppImage tooling
+          cp AppDir/usr/share/icons/hicolor/256x256/apps/lightningview.png AppDir/lightningview.png
+          cp AppDir/usr/share/applications/lightningview.desktop AppDir/lightningview.desktop
+
+      - name: Download linuxdeploy
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+
+      - name: Build AppImage
+        env:
+          # GitHub Actions runners do not always allow FUSE; extract and run instead.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          # Embeds the version into the output file name.
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          OUTPUT: LightningView-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}-x86_64.AppImage
+        run: |
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --desktop-file AppDir/usr/share/applications/lightningview.desktop \
+            --icon-file AppDir/lightningview.png \
+            --output appimage
+          # linuxdeploy names its output based on the desktop entry; rename to a stable name.
+          mv LightningView-*.AppImage "$OUTPUT" 2>/dev/null || mv ./*.AppImage "$OUTPUT"
+
+      - name: Archive AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-appimage
+          path: ./*.AppImage
+
+  build-chocolatey:
+    name: Build Chocolatey package
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [[ $GITHUB_REF_TYPE == "tag" ]]; then
+            # Strip a leading "v" if present (e.g. v2.4.6 -> 2.4.6)
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: Download Windows build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: result-x86_64-pc-windows-msvc
+          path: ./win-zip
+
+      - name: Compute zip checksum
+        id: sum
+        shell: bash
+        run: |
+          ZIP=$(ls ./win-zip/*.zip | head -n1)
+          if [[ -z "$ZIP" ]]; then
+            echo "No Windows zip found in ./win-zip" >&2
+            exit 1
+          fi
+          SUM=$(sha256sum "$ZIP" | awk '{print toupper($1)}')
+          echo "checksum=$SUM" >> $GITHUB_OUTPUT
+
+      - name: Stamp nuspec and install script
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          SUM: ${{ steps.sum.outputs.checksum }}
+        run: |
+          sed -i "s|@@VERSION@@|${VER}|g" packaging/chocolatey/lightningview.nuspec
+          sed -i "s|@@VERSION@@|${VER}|g" packaging/chocolatey/tools/chocolateyinstall.ps1
+          sed -i "s|@@CHECKSUM64@@|${SUM}|g" packaging/chocolatey/tools/chocolateyinstall.ps1
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          cd packaging/chocolatey
+          choco pack lightningview.nuspec --out ../../
+
+      - name: Archive Chocolatey package
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-chocolatey
+          path: ./*.nupkg
+
+  build-flatpak:
+    name: Build Linux Flatpak
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Flatpak Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder elfutils
+          sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Sdk//24.08 \
+                                          org.freedesktop.Platform//24.08 \
+                                          org.freedesktop.Sdk.Extension.rust-stable//24.08 \
+                                          org.freedesktop.Sdk.Extension.llvm18//24.08
+
+      - name: Vendor Cargo dependencies
+        run: |
+          mkdir -p .cargo
+          # Re-resolve so the lockfile reflects the current Cargo.toml
+          rm -f Cargo.lock
+          cargo generate-lockfile
+
+          # Vendor crates.io dependencies into ./vendor and write the redirect
+          cargo vendor > .cargo/config.toml
+
+          # Manual override for the 'rawler' (dnglab) git dependency
+          cat >> .cargo/config.toml <<'EOF'
+
+          [source."https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"]
+          git = "https://github.com/dividebysandwich/dnglab.git?diamond_fix=1"
+          replace-with = "vendored-sources"
+
+          [source."https://github.com/dividebysandwich/imagepipe"]
+          git = "https://github.com/dividebysandwich/imagepipe"
+          replace-with = "vendored-sources"
+          EOF
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: lightningview.flatpak
+          manifest-path: io.github.dividebysandwich.lightningview.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Archive Flatpak Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-flatpak
+          path: lightningview.flatpak
+
   deploy:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build, build-deb, build-msi]
+    needs: [build, build-deb, build-msi, build-appimage, build-chocolatey, build-flatpak]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -280,12 +456,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-      
-#      - name: Rename Flatpak
-#        run: |
-#          VERSION=${{ github.ref_name }}
-#          mv ./artifacts/flatpak-bundle/io.github.dividebysandwich.lightningview.flatpak ./lightningview-${VERSION}-x86_64.flatpak
-      
+
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
@@ -294,4 +465,6 @@ jobs:
             ./artifacts/*/*.zip
             ./artifacts/*/*.deb
             ./artifacts/*/*.msi
-#            ./*.flatpak
+            ./artifacts/*/*.AppImage
+            ./artifacts/*/*.nupkg
+            ./artifacts/*/*.flatpak

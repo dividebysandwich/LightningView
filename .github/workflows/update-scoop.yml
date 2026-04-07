@@ -1,0 +1,66 @@
+name: Update Scoop manifest
+
+# Refreshes packaging/scoop/lightningview.json after a release is published.
+# Computes the SHA-256 of the published Windows zip and commits the new
+# version + hash back to main.
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to refresh, e.g. v2.4.6"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  update-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute new version + hash
+        id: meta
+        env:
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          # Strip a leading "v" for the manifest version field
+          VERSION="${TAG#v}"
+          ASSET_URL="https://github.com/dividebysandwich/LightningView/releases/download/${TAG}/lightningview-x86_64-pc-windows-msvc-${TAG}.zip"
+
+          echo "Fetching $ASSET_URL"
+          curl -fsSL -o asset.zip "$ASSET_URL"
+          HASH=$(sha256sum asset.zip | awk '{print $1}')
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "url=$ASSET_URL" >> $GITHUB_OUTPUT
+
+      - name: Patch manifest
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          URL:     ${{ steps.meta.outputs.url }}
+          HASH:    ${{ steps.meta.outputs.hash }}
+        run: |
+          # jq -i is not a thing, write to a temp file then move.
+          jq --arg v "$VERSION" --arg u "$URL" --arg h "$HASH" '
+            .version = $v
+            | .architecture["64bit"].url  = $u
+            | .architecture["64bit"].hash = $h
+          ' packaging/scoop/lightningview.json > packaging/scoop/lightningview.json.new
+          mv packaging/scoop/lightningview.json.new packaging/scoop/lightningview.json
+
+      - name: Commit changes
+        run: |
+          if git diff --quiet packaging/scoop/lightningview.json; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/scoop/lightningview.json
+          git commit -m "scoop: bump manifest to ${{ steps.meta.outputs.tag }}"
+          git push

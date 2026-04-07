@@ -1,0 +1,29 @@
+{
+    "version": "2.4.6",
+    "description": "A fast cross-platform image viewer written in Rust. Supports common formats, RAW from many cameras, JPEG-XL, and FITS.",
+    "homepage": "https://github.com/dividebysandwich/LightningView",
+    "license": "GPL-2.0-only",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/dividebysandwich/LightningView/releases/download/v2.4.6/lightningview-x86_64-pc-windows-msvc-v2.4.6.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "lightningview.exe",
+    "shortcuts": [
+        [
+            "lightningview.exe",
+            "LightningView"
+        ]
+    ],
+    "checkver": {
+        "github": "https://github.com/dividebysandwich/LightningView"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/dividebysandwich/LightningView/releases/download/v$version/lightningview-x86_64-pc-windows-msvc-v$version.zip"
+            }
+        }
+    }
+}

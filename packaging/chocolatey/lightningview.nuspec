@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>lightningview</id>
+    <version>@@VERSION@@</version>
+    <title>LightningView</title>
+    <authors>The LightningView developers</authors>
+    <owners>dividebysandwich</owners>
+    <projectUrl>https://github.com/dividebysandwich/LightningView</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/dividebysandwich/LightningView/main/lightningview.png</iconUrl>
+    <licenseUrl>https://github.com/dividebysandwich/LightningView/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/dividebysandwich/LightningView</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/dividebysandwich/LightningView/issues</bugTrackerUrl>
+    <docsUrl>https://github.com/dividebysandwich/LightningView/blob/main/README.md</docsUrl>
+    <tags>image viewer raw fits jxl photo lightningview</tags>
+    <summary>A fast cross-platform image viewer written in Rust.</summary>
+    <description>
+LightningView is a lightweight, lightning-fast image viewer that supports a wide range of formats including JPEG, PNG, WebP, AVIF, JPEG-XL, TIFF, FITS, and many camera RAW formats (Sony ARW, Canon CR2/CR3, Nikon NEF, Adobe DNG, Fuji RAF, and more). It is designed to get out of the way: open an image, browse the directory with arrow keys, pan and zoom with the mouse, and delete files in place.
+    </description>
+    <releaseNotes>https://github.com/dividebysandwich/LightningView/releases/tag/v@@VERSION@@</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

@@ -1,0 +1,30 @@
+name: Publish to WinGet
+
+# Fires once a GitHub release has been *published* (i.e. the deploy job in
+# release.yml uploaded all the assets and the release became visible).
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)submit, e.g. v2.4.6"
+        required: true
+
+jobs:
+  winget:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit manifest to winget-pkgs
+        uses: vedantmgoyal2009/winget-releaser@v2
+        with:
+          # The package identifier in the winget-pkgs repository.
+          # On first submission this identifier must be reserved by you.
+          identifier: dividebysandwich.LightningView
+          # Glob that picks the asset(s) to publish. We ship a single x86_64 zip.
+          installers-regex: 'lightningview-x86_64-pc-windows-msvc-.*\.zip$'
+          # Use the input tag for manual runs, otherwise the tag from the release event.
+          release-tag: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          # Personal access token (classic) with `public_repo` scope, belonging to a
+          # GitHub account that has forked microsoft/winget-pkgs. Stored as a repo secret.
+          token: ${{ secrets.WINGET_TOKEN }}
