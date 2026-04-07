@@ -25,9 +25,12 @@ finish-args:
   - --filesystem=host
 
   # --- System Integration ---
-  # Read system theme/settings (helps eframe/egui look correct)
+  # Read system theme/settings (helps eframe/egui look correct).
+  # The legacy `--config=dconf` shorthand was removed; modern flatpak wants
+  # the explicit dconf trio: a socket bind and a D-Bus talk permission.
   - --filesystem=xdg-run/dconf
-  - --config=dconf
+  - --talk-name=ca.desrt.dconf
+  - --env=DCONF_USER_CONFIG_DIR=dconf
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
