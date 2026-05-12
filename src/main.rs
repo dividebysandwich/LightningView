@@ -15,7 +15,9 @@ use std::{
     fs,
     io::BufReader,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    sync::mpsc::{channel, Receiver, TryRecvError},
+    thread,
+    time::{Instant, SystemTime, UNIX_EPOCH},
     borrow::Cow,
 };
 
@@ -47,6 +49,12 @@ struct DisplayableImage {
     needs_tiling: bool,
 }
 
+struct PendingLoad {
+    receiver: Receiver<Result<LoadedImage, String>>,
+    path: PathBuf,
+    preview_width: u32,
+}
+
 // Simplified enum for loaded image data before GPU upload
 enum LoadedImage {
     Static(ColorImage),
@@ -69,6 +77,7 @@ struct ImageViewerApp {
     show_delete_confirmation: bool,
     last_error: Option<String>,
     clipboard: Option<Clipboard>,
+    pending_full_res: Option<PendingLoad>,
 }
 
 impl ImageViewerApp {
@@ -87,6 +96,7 @@ impl ImageViewerApp {
             show_delete_confirmation: false,
             last_error: None,
             clipboard: Clipboard::new().ok(),
+            pending_full_res: None,
         };
         if let Some(path) = path {
             app.gather_images_from_directory(&path);
@@ -103,45 +113,148 @@ impl ImageViewerApp {
 
     fn load_image_at_index(&mut self, index: usize, ctx: &egui::Context) {
         self.current_index = index;
-        let path = &self.image_files[self.image_order[self.current_index]];
+        let path = self.image_files[self.image_order[self.current_index]].clone();
         log::info!("Loading image: {}", path.display());
         let start_time = Instant::now();
 
-        match load_image(path) {
-            Ok(LoadedImage::Static(full_res_image)) => {
-                let max_texture_side = 2048; // TODO: Detect limit
-                let needs_tiling = full_res_image.width() > max_texture_side || full_res_image.height() > max_texture_side;
+        self.is_scaled_to_fit = true;
+        self.velocity = Vec2::ZERO;
+        self.pending_full_res = None;
 
-                let preview_image = if needs_tiling {
-                    downscale_color_image(full_res_image.clone(), max_texture_side)
-                } else {
-                    full_res_image.clone()
-                };
-
-                let preview_texture = ctx.load_texture(
-                    format!("{}_preview", path.display()),
-                    preview_image,
-                    Default::default(),
-                );
-
-                self.image = Some(DisplayableImage {
-                    full_res_image,
-                    preview_texture,
-                    tile_cache: HashMap::new(),
-                    needs_tiling,
-                });
-
-                self.is_scaled_to_fit = true;
-                self.last_error = None;
-                log::info!("Loaded '{}' in {:.2?}", path.display(), start_time.elapsed());
-            }
-            Err(e) => {
-                self.last_error = Some(e.clone());
-                self.image = None;
-                log::error!("Failed to load image: {}", e);
+        if let Some(LoadedImage::Static(preview)) = load_preload_cache(&path) {
+            log::info!("Loaded preload-cache preview for '{}' in {:.2?}", path.display(), start_time.elapsed());
+            self.display_loaded_image(preview, &path, ctx);
+            self.start_full_res_load(path, ctx);
+        } else {
+            match load_image(&path) {
+                Ok(LoadedImage::Static(full_res_image)) => {
+                    self.display_loaded_image(full_res_image, &path, ctx);
+                    log::info!("Loaded '{}' in {:.2?}", path.display(), start_time.elapsed());
+                    self.preload_next_image();
+                }
+                Err(e) => {
+                    self.last_error = Some(e.clone());
+                    self.image = None;
+                    log::error!("Failed to load image: {}", e);
+                }
             }
         }
         ctx.request_repaint();
+    }
+
+    fn display_loaded_image(&mut self, image: ColorImage, path: &Path, ctx: &egui::Context) {
+        let max_texture_side = 2048; // TODO: Detect limit
+        let needs_tiling = image.width() > max_texture_side || image.height() > max_texture_side;
+
+        let preview_image = if needs_tiling {
+            downscale_color_image(image.clone(), max_texture_side)
+        } else {
+            image.clone()
+        };
+
+        let preview_texture = ctx.load_texture(
+            format!("{}_preview", path.display()),
+            preview_image,
+            Default::default(),
+        );
+
+        self.image = Some(DisplayableImage {
+            full_res_image: image,
+            preview_texture,
+            tile_cache: HashMap::new(),
+            needs_tiling,
+        });
+
+        self.last_error = None;
+    }
+
+    fn start_full_res_load(&mut self, path: PathBuf, ctx: &egui::Context) {
+        let preview_width = self
+            .image
+            .as_ref()
+            .map(|i| i.full_res_image.width() as u32)
+            .unwrap_or(0);
+        let (tx, rx) = channel();
+        let ctx_clone = ctx.clone();
+        let path_clone = path.clone();
+        thread::spawn(move || {
+            let result = load_image(&path_clone);
+            let _ = tx.send(result);
+            ctx_clone.request_repaint();
+        });
+        self.pending_full_res = Some(PendingLoad {
+            receiver: rx,
+            path,
+            preview_width,
+        });
+    }
+
+    fn check_pending_load(&mut self, ctx: &egui::Context) {
+        let result = {
+            let Some(pending) = self.pending_full_res.as_ref() else { return };
+            match pending.receiver.try_recv() {
+                Ok(r) => r,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.pending_full_res = None;
+                    return;
+                }
+            }
+        };
+        let pending = self.pending_full_res.take().unwrap();
+
+        let current_path = self
+            .image_files
+            .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX))
+            .cloned();
+        if current_path.as_ref() != Some(&pending.path) {
+            log::debug!("Discarding stale full-res load for {}", pending.path.display());
+            return;
+        }
+
+        match result {
+            Ok(LoadedImage::Static(full_res)) => {
+                let new_width = full_res.width() as f32;
+                let preview_width = pending.preview_width as f32;
+                if preview_width > 0.0 && new_width > 0.0 && !self.is_scaled_to_fit {
+                    // Preserve the user's current view: the displayed size of the image
+                    // (full_res_size * zoom) should stay the same across the swap.
+                    self.zoom *= preview_width / new_width;
+                }
+                self.display_loaded_image(full_res, &pending.path, ctx);
+                log::info!("Swapped in full-res image: {}", pending.path.display());
+                self.preload_next_image();
+                ctx.request_repaint();
+            }
+            Err(e) => {
+                log::error!("Background full-res load failed for {}: {}", pending.path.display(), e);
+            }
+        }
+    }
+
+    fn preload_next_image(&self) {
+        if self.image_files.is_empty() {
+            return;
+        }
+        let next_idx = (self.current_index + 1) % self.image_files.len();
+        let Some(&order_idx) = self.image_order.get(next_idx) else { return };
+        let Some(next_path) = self.image_files.get(order_idx).cloned() else { return };
+        if preload_cache_path(&next_path).exists() {
+            return;
+        }
+        thread::spawn(move || {
+            log::debug!("Preloading next image: {}", next_path.display());
+            match decode_image_data(&next_path) {
+                Ok(img) => {
+                    if let Err(e) = save_preload_cache(&img, &next_path) {
+                        log::warn!("Failed to save preload cache for {}: {}", next_path.display(), e);
+                    }
+                }
+                Err(e) => {
+                    log::debug!("Failed to preload next image {}: {}", next_path.display(), e);
+                }
+            }
+        });
     }
 
     fn copy_to_clipboard(&mut self) {
@@ -287,6 +400,7 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     }
 
     self.handle_keyboard_input(&ctx);
+    self.check_pending_load(&ctx);
 
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
@@ -580,22 +694,119 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     }
 }
 
+// --- Preload Cache ---
+
+const PRELOAD_CACHE_WIDTH: u32 = 1920;
+const PRELOAD_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+fn fnv1a_hash(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn preload_cache_dir() -> PathBuf {
+    env::temp_dir().join("lightningview")
+}
+
+fn preload_cache_filename(path: &Path) -> String {
+    let canonical = path.canonicalize();
+    let base = canonical.as_deref().unwrap_or(path);
+    let mut input = base.to_string_lossy().to_string();
+    if let Ok(meta) = path.metadata() {
+        input.push('|');
+        input.push_str(&meta.len().to_string());
+        if let Ok(modified) = meta.modified() {
+            if let Ok(dur) = modified.duration_since(UNIX_EPOCH) {
+                input.push('|');
+                input.push_str(&dur.as_nanos().to_string());
+            }
+        }
+    }
+    format!("{:016x}.jpg", fnv1a_hash(input.as_bytes()))
+}
+
+fn preload_cache_path(path: &Path) -> PathBuf {
+    preload_cache_dir().join(preload_cache_filename(path))
+}
+
+fn save_preload_cache(img: &DynamicImage, image_path: &Path) -> Result<(), String> {
+    if img.width() <= PRELOAD_CACHE_WIDTH {
+        return Ok(());
+    }
+    let cache_path = preload_cache_path(image_path);
+    if cache_path.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(preload_cache_dir())
+        .map_err(|e| format!("Failed to create preload cache dir: {}", e))?;
+
+    let aspect = img.height() as f32 / img.width() as f32;
+    let new_h = ((PRELOAD_CACHE_WIDTH as f32 * aspect).round() as u32).max(1);
+    let resized = img.resize_exact(PRELOAD_CACHE_WIDTH, new_h, imageops::FilterType::Lanczos3);
+    let rgb = resized.to_rgb8();
+    DynamicImage::ImageRgb8(rgb)
+        .save_with_format(&cache_path, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("Failed to save preload cache JPEG: {}", e))?;
+    log::debug!("Saved preload cache: {}", cache_path.display());
+    Ok(())
+}
+
+fn load_preload_cache(path: &Path) -> Option<LoadedImage> {
+    let cache_path = preload_cache_path(path);
+    if !cache_path.exists() {
+        return None;
+    }
+    match image::open(&cache_path) {
+        Ok(img) => {
+            log::debug!("Hit preload cache for {}", path.display());
+            Some(LoadedImage::Static(to_egui_color_image(img)))
+        }
+        Err(e) => {
+            log::warn!("Failed to read preload cache {}: {}", cache_path.display(), e);
+            let _ = fs::remove_file(&cache_path);
+            None
+        }
+    }
+}
+
+fn clear_old_preload_cache() {
+    let dir = preload_cache_dir();
+    let Ok(entries) = fs::read_dir(&dir) else { return };
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        let Ok(age) = now.duration_since(modified) else { continue };
+        if age.as_secs() > PRELOAD_CACHE_TTL_SECS {
+            if fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        log::info!("Cleared {} stale preload cache entries", removed);
+    }
+}
+
 // --- Image Loading & Helper Functions ---
 
-fn load_image(path: &Path) -> Result<LoadedImage, String> {
+fn decode_image_data(path: &Path) -> Result<DynamicImage, String> {
     let path_str = path.to_string_lossy();
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-    
+
     if ANIM_SUPPORTED_FORMATS.contains(&extension.as_str()) {
-        let frames = load_animated_gif_frames(&path_str)?;
-        let first_frame = frames.into_iter().next().map(|(img, _)| img).ok_or_else(|| "GIF has no frames".to_string())?;
-        return Ok(LoadedImage::Static(first_frame));
+        return load_gif_first_frame(&path_str);
     }
 
     log::info!("Loading image: {}", path_str);
     log::info!("Detected format based on extension: {}", extension);
 
-    let dynamic_image = if RAW_SUPPORTED_FORMATS.contains(&extension.as_str()) {
+    if RAW_SUPPORTED_FORMATS.contains(&extension.as_str()) {
         load_raw(&path_str)
     } else if FITS_SUPPORTED_FORMATS.contains(&extension.as_str()) {
         load_fits(&path_str)
@@ -603,8 +814,12 @@ fn load_image(path: &Path) -> Result<LoadedImage, String> {
         load_jxl(&path_str)
     } else {
         load_with_image_crate(&path_str)
-    }?;
+    }
+}
 
+fn load_image(path: &Path) -> Result<LoadedImage, String> {
+    let dynamic_image = decode_image_data(path)?;
+    let _ = save_preload_cache(&dynamic_image, path);
     Ok(LoadedImage::Static(to_egui_color_image(dynamic_image)))
 }
 
@@ -619,22 +834,16 @@ fn load_jxl(path: &str) -> Result<DynamicImage, String> {
     Ok(dynamic_image)
 }
 
-fn load_animated_gif_frames(path: &str) -> Result<Vec<(ColorImage, Duration)>, String> {
+fn load_gif_first_frame(path: &str) -> Result<DynamicImage, String> {
     let file = fs::File::open(path).map_err(|e| format!("Failed to open GIF: {}", e))?;
     let reader = BufReader::new(file);
     let decoder = GifDecoder::new(reader).map_err(|e| format!("Failed to create GIF decoder: {}", e))?;
-    let frames = decoder.into_frames().collect_frames().map_err(|e| format!("Failed to decode GIF frames: {}", e))?;
-
-    Ok(frames
-        .into_iter()
-        .map(|frame| {
-            let delay = Duration::from(frame.delay());
-            let image_buffer = frame.into_buffer();
-            let dims = image_buffer.dimensions();
-            let color_image = ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], image_buffer.as_raw());
-            (color_image, delay)
-        })
-        .collect())
+    let frame = decoder
+        .into_frames()
+        .next()
+        .ok_or_else(|| "GIF has no frames".to_string())?
+        .map_err(|e| format!("Failed to decode GIF frame: {}", e))?;
+    Ok(DynamicImage::ImageRgba8(frame.into_buffer()))
 }
 
 fn to_egui_color_image(img: DynamicImage) -> ColorImage {
@@ -738,6 +947,7 @@ fn downscale_color_image(image: ColorImage, max_size: usize) -> ColorImage {
 // --- Main Entry Point ---
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
+    clear_old_preload_cache();
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         println!("Usage: {} [/windowed] <imagefile>", args[0]);
