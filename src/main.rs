@@ -15,9 +15,13 @@ use std::{
     fs,
     io::BufReader,
     path::{Path, PathBuf},
-    sync::mpsc::{channel, Receiver, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{channel, Receiver, TryRecvError},
+    },
     thread,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     borrow::Cow,
 };
 
@@ -55,6 +59,14 @@ struct PendingLoad {
     preview_width: u32,
 }
 
+/// Shared control flags for the long-lived bulk preload worker.
+/// `paused` is toggled by the UI thread around foreground loads to avoid CPU contention;
+/// the worker only honors it between images (decoders are not interruptible mid-frame).
+struct PreloadState {
+    paused: AtomicBool,
+    shutdown: AtomicBool,
+}
+
 // Simplified enum for loaded image data before GPU upload
 enum LoadedImage {
     Static(ColorImage),
@@ -78,6 +90,7 @@ struct ImageViewerApp {
     last_error: Option<String>,
     clipboard: Option<Clipboard>,
     pending_full_res: Option<PendingLoad>,
+    preload_state: Option<Arc<PreloadState>>,
 }
 
 impl ImageViewerApp {
@@ -97,11 +110,13 @@ impl ImageViewerApp {
             last_error: None,
             clipboard: Clipboard::new().ok(),
             pending_full_res: None,
+            preload_state: None,
         };
         if let Some(path) = path {
             app.gather_images_from_directory(&path);
             if !app.image_files.is_empty() {
                 app.load_image_at_index(app.current_index, &cc.egui_ctx);
+                app.start_bulk_preload();
             } else {
                 app.last_error = Some(format!("No supported images found in directory of '{}'", path.display()));
             }
@@ -120,17 +135,18 @@ impl ImageViewerApp {
         self.is_scaled_to_fit = true;
         self.velocity = Vec2::ZERO;
         self.pending_full_res = None;
+        self.pause_preload();
 
         if let Some(LoadedImage::Static(preview)) = load_preload_cache(&path) {
             log::info!("Loaded preload-cache preview for '{}' in {:.2?}", path.display(), start_time.elapsed());
             self.display_loaded_image(preview, &path, ctx);
             self.start_full_res_load(path, ctx);
+            // Bulk preload stays paused until the full-res arrives (resumed in check_pending_load).
         } else {
             match load_image(&path) {
                 Ok(LoadedImage::Static(full_res_image)) => {
                     self.display_loaded_image(full_res_image, &path, ctx);
                     log::info!("Loaded '{}' in {:.2?}", path.display(), start_time.elapsed());
-                    self.preload_next_image();
                 }
                 Err(e) => {
                     self.last_error = Some(e.clone());
@@ -138,6 +154,7 @@ impl ImageViewerApp {
                     log::error!("Failed to load image: {}", e);
                 }
             }
+            self.resume_preload();
         }
         ctx.request_repaint();
     }
@@ -197,6 +214,7 @@ impl ImageViewerApp {
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
                     self.pending_full_res = None;
+                    self.resume_preload();
                     return;
                 }
             }
@@ -209,6 +227,9 @@ impl ImageViewerApp {
             .cloned();
         if current_path.as_ref() != Some(&pending.path) {
             log::debug!("Discarding stale full-res load for {}", pending.path.display());
+            // A newer navigation is already in flight and re-pauses on its own; resume here
+            // so the bulk worker can keep going if that newer load somehow never completes.
+            self.resume_preload();
             return;
         }
 
@@ -223,38 +244,53 @@ impl ImageViewerApp {
                 }
                 self.display_loaded_image(full_res, &pending.path, ctx);
                 log::info!("Swapped in full-res image: {}", pending.path.display());
-                self.preload_next_image();
                 ctx.request_repaint();
             }
             Err(e) => {
                 log::error!("Background full-res load failed for {}: {}", pending.path.display(), e);
             }
         }
+        self.resume_preload();
     }
 
-    fn preload_next_image(&self) {
-        if self.image_files.is_empty() {
+    fn start_bulk_preload(&mut self) {
+        // Shut down any prior worker so we don't have two running.
+        if let Some(state) = self.preload_state.take() {
+            state.shutdown.store(true, Ordering::Relaxed);
+        }
+        let n = self.image_files.len();
+        if n <= 1 {
             return;
         }
-        let next_idx = (self.current_index + 1) % self.image_files.len();
-        let Some(&order_idx) = self.image_order.get(next_idx) else { return };
-        let Some(next_path) = self.image_files.get(order_idx).cloned() else { return };
-        if preload_cache_path(&next_path).exists() {
-            return;
+        // Walk the display order starting from current+1; the current image is the user's
+        // focus and doesn't need preloading.
+        let mut paths: Vec<PathBuf> = Vec::with_capacity(n - 1);
+        for i in 1..n {
+            let idx = (self.current_index + i) % n;
+            let order_idx = self.image_order[idx];
+            paths.push(self.image_files[order_idx].clone());
         }
-        thread::spawn(move || {
-            log::debug!("Preloading next image: {}", next_path.display());
-            match decode_image_data(&next_path) {
-                Ok(img) => {
-                    if let Err(e) = save_preload_cache(&img, &next_path) {
-                        log::warn!("Failed to save preload cache for {}: {}", next_path.display(), e);
-                    }
-                }
-                Err(e) => {
-                    log::debug!("Failed to preload next image {}: {}", next_path.display(), e);
-                }
-            }
+        // Start paused if a full-res load is already in flight, so the worker doesn't
+        // race the foreground decoder on app startup.
+        let initial_paused = self.pending_full_res.is_some();
+        let state = Arc::new(PreloadState {
+            paused: AtomicBool::new(initial_paused),
+            shutdown: AtomicBool::new(false),
         });
+        self.preload_state = Some(state.clone());
+        thread::spawn(move || preload_worker(state, paths));
+    }
+
+    fn pause_preload(&self) {
+        if let Some(s) = &self.preload_state {
+            s.paused.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn resume_preload(&self) {
+        if let Some(s) = &self.preload_state {
+            s.paused.store(false, Ordering::Relaxed);
+        }
     }
 
     fn copy_to_clipboard(&mut self) {
@@ -771,6 +807,36 @@ fn load_preload_cache(path: &Path) -> Option<LoadedImage> {
             None
         }
     }
+}
+
+/// Long-lived worker that decodes every image in the directory once, saving preload caches.
+/// The worker honors `state.paused` between images so foreground loads get exclusive CPU,
+/// and exits when `state.shutdown` is set or when it has walked the whole list.
+fn preload_worker(state: Arc<PreloadState>, paths: Vec<PathBuf>) {
+    log::debug!("Bulk preload worker starting ({} images)", paths.len());
+    for path in paths {
+        if state.shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        while state.paused.load(Ordering::Relaxed) {
+            if state.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if preload_cache_path(&path).exists() {
+            continue;
+        }
+        match decode_image_data(&path) {
+            Ok(img) => {
+                if let Err(e) = save_preload_cache(&img, &path) {
+                    log::warn!("Bulk preload save failed for {}: {}", path.display(), e);
+                }
+            }
+            Err(e) => log::debug!("Bulk preload decode failed for {}: {}", path.display(), e),
+        }
+    }
+    log::info!("Bulk preload worker finished");
 }
 
 fn clear_old_preload_cache() {
