@@ -41,7 +41,7 @@ codegen-units = 1
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "2.4.5"
+version = "2.4.6"
 license = "GPLv2"
 icon = ["logo_256.png"]
 copyright = "2025-2026, the LightningView developers"

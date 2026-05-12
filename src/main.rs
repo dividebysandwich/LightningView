@@ -259,12 +259,16 @@ impl ImageViewerApp {
             self.last_image(ctx);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if self.show_delete_confirmation {
+                self.show_delete_confirmation = false;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F)) {
             self.is_fullscreen = !self.is_fullscreen;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if !self.show_delete_confirmation && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             self.is_scaled_to_fit = !self.is_scaled_to_fit;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
@@ -543,11 +547,12 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
                 if let Some(path) = &path {
                 ui.label(format!("Are you sure you want to delete '{}'?", path.display()));
                 ui.add_space(10.0);
+                let confirm_with_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         self.show_delete_confirmation = false;
                     }
-                    if ui.button(egui::RichText::new("Delete").color(Color32::RED)).clicked() {
+                    if ui.button(egui::RichText::new("Delete").color(Color32::RED)).clicked() || confirm_with_enter {
                         if let Err(e) = fs::remove_file(path) {
                             self.last_error = Some(format!("Failed to delete file: {}", e));
                         } else {
