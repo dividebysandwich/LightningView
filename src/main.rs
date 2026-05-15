@@ -752,10 +752,19 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
                         self.show_delete_confirmation = false;
                     }
                     if ui.button(egui::RichText::new("Delete").color(Color32::RED)).clicked() || confirm_with_enter {
+                        // Compute the cache path *before* deleting the source — the cache
+                        // filename hash incorporates the file's size and mtime, which
+                        // become unavailable once the file is gone.
+                        let cache_path = preload_cache_path(path);
                         if let Err(e) = fs::remove_file(path) {
                             self.last_error = Some(format!("Failed to delete file: {}", e));
                         } else {
                             log::info!("Deleted file: {}", path.display());
+                            if cache_path.exists() {
+                                if let Err(e) = fs::remove_file(&cache_path) {
+                                    log::warn!("Failed to delete preload cache {}: {}", cache_path.display(), e);
+                                }
+                            }
                             let removed_order_index = self.image_order.remove(self.current_index);
                             self.image_files.remove(removed_order_index);
                             for order_idx in self.image_order.iter_mut() {
