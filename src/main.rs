@@ -9,16 +9,16 @@ use rustronomy_fits as rsf;
 use jxl_oxide::integration::JxlDecoder;
 use arboard::{Clipboard, ImageData};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     error::Error,
     fs,
     io::BufReader,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{channel, Receiver, TryRecvError},
+        mpsc::{channel, Receiver, Sender, TryRecvError},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -32,6 +32,10 @@ use crate::windows::*;
 
 // --- Constants ---
 const TILE_SIZE: usize = 1024; // Use tiles of 1024x1024 pixels for the detail view
+/// Maximum time we wait for a full-res decode before assuming the worker is stuck
+/// (slow/hung decoder, bad file). After this we respawn the worker and unblock
+/// the bulk preload so the app doesn't sit there silently forever.
+const FULL_RES_WATCHDOG: Duration = Duration::from_secs(20);
 
 // --- Supported Formats ---
 pub const IMAGEREADER_SUPPORTED_FORMATS: [&str; 4] = ["webp", "tif", "tiff", "tga"];
@@ -53,17 +57,32 @@ struct DisplayableImage {
     needs_tiling: bool,
 }
 
-struct PendingLoad {
-    receiver: Receiver<Result<LoadedImage, String>>,
+/// Request sent to the long-lived full-res decoder worker.
+struct FullResRequest {
     path: PathBuf,
     preview_width: u32,
 }
 
-/// Shared control flags for the long-lived bulk preload worker.
-/// `paused` is toggled by the UI thread around foreground loads to avoid CPU contention;
-/// the worker only honors it between images (decoders are not interruptible mid-frame).
+/// Reply produced by the full-res worker for the UI to consume.
+struct FullResReply {
+    path: PathBuf,
+    preview_width: u32,
+    result: Result<LoadedImage, String>,
+}
+
+/// Single long-lived worker that decodes the foreground full-res image.
+/// Rapid navigation queues many requests; the worker drains intermediate ones
+/// and only decodes the most recently requested image, so the CPU isn't split
+/// across N stale decodes when the user settles on a frame.
+struct FullResWorker {
+    tx: Sender<FullResRequest>,
+    rx: Receiver<FullResReply>,
+}
+
+/// Shared control flag for the long-lived bulk preload workers.
+/// Workers run continuously — the foreground full-res decoder is a single latest-wins
+/// thread, so there's no need to throttle bulk preload around navigation any more.
 struct PreloadState {
-    paused: AtomicBool,
     shutdown: AtomicBool,
 }
 
@@ -89,12 +108,15 @@ struct ImageViewerApp {
     show_delete_confirmation: bool,
     last_error: Option<String>,
     clipboard: Option<Clipboard>,
-    pending_full_res: Option<PendingLoad>,
+    full_res_pending: bool,
+    full_res_pending_since: Option<Instant>,
+    full_res_worker: Option<FullResWorker>,
     preload_state: Option<Arc<PreloadState>>,
 }
 
 impl ImageViewerApp {
     fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, initial_fullscreen: bool) -> Self {
+        let full_res_worker = Some(spawn_full_res_worker(cc.egui_ctx.clone()));
         let mut app = Self {
             image: None,
             image_files: Vec::new(),
@@ -109,7 +131,9 @@ impl ImageViewerApp {
             show_delete_confirmation: false,
             last_error: None,
             clipboard: Clipboard::new().ok(),
-            pending_full_res: None,
+            full_res_pending: false,
+            full_res_pending_since: None,
+            full_res_worker,
             preload_state: None,
         };
         if let Some(path) = path {
@@ -134,14 +158,13 @@ impl ImageViewerApp {
 
         self.is_scaled_to_fit = true;
         self.velocity = Vec2::ZERO;
-        self.pending_full_res = None;
-        self.pause_preload();
+        self.full_res_pending = false;
+        self.full_res_pending_since = None;
 
         if let Some(LoadedImage::Static(preview)) = load_preload_cache(&path) {
             log::info!("Loaded preload-cache preview for '{}' in {:.2?}", path.display(), start_time.elapsed());
             self.display_loaded_image(preview, &path, ctx);
             self.start_full_res_load(path, ctx);
-            // Bulk preload stays paused until the full-res arrives (resumed in check_pending_load).
         } else {
             match load_image(&path) {
                 Ok(LoadedImage::Static(full_res_image)) => {
@@ -154,7 +177,6 @@ impl ImageViewerApp {
                     log::error!("Failed to load image: {}", e);
                 }
             }
-            self.resume_preload();
         }
         ctx.request_repaint();
     }
@@ -191,66 +213,87 @@ impl ImageViewerApp {
             .as_ref()
             .map(|i| i.full_res_image.width() as u32)
             .unwrap_or(0);
-        let (tx, rx) = channel();
-        let ctx_clone = ctx.clone();
-        let path_clone = path.clone();
-        thread::spawn(move || {
-            let result = load_image(&path_clone);
-            let _ = tx.send(result);
-            ctx_clone.request_repaint();
-        });
-        self.pending_full_res = Some(PendingLoad {
-            receiver: rx,
-            path,
-            preview_width,
-        });
+        let request = FullResRequest { path: path.clone(), preview_width };
+        let send_result = self
+            .full_res_worker
+            .as_ref()
+            .map(|w| w.tx.send(request));
+        // If the worker channel is gone (e.g. it panicked out of catch_unwind), respawn it
+        // so subsequent navigations still get full-res loads.
+        if !matches!(send_result, Some(Ok(()))) {
+            log::warn!("Full-res worker unavailable; respawning.");
+            let worker = spawn_full_res_worker(ctx.clone());
+            let _ = worker.tx.send(FullResRequest { path: path.clone(), preview_width });
+            self.full_res_worker = Some(worker);
+        }
+        self.full_res_pending = true;
+        self.full_res_pending_since = Some(Instant::now());
+        // Ensure the watchdog gets a chance to run even if the UI stays idle.
+        ctx.request_repaint_after(FULL_RES_WATCHDOG);
     }
 
     fn check_pending_load(&mut self, ctx: &egui::Context) {
-        let result = {
-            let Some(pending) = self.pending_full_res.as_ref() else { return };
-            match pending.receiver.try_recv() {
+        // Watchdog: if a full-res decode hasn't returned for too long, the worker is
+        // likely stuck on a slow/bad file. Drop it so the next nav respawns a fresh one.
+        if self.full_res_pending {
+            if let Some(since) = self.full_res_pending_since {
+                if since.elapsed() > FULL_RES_WATCHDOG {
+                    log::warn!(
+                        "Full-res worker stuck for {:.1?}; respawning on next navigation.",
+                        since.elapsed()
+                    );
+                    self.full_res_worker = None;
+                    self.full_res_pending = false;
+                    self.full_res_pending_since = None;
+                }
+            }
+        }
+
+        let Some(worker) = self.full_res_worker.as_ref() else { return };
+        // Drain all available replies, skipping stale ones (path doesn't match current).
+        loop {
+            let reply = match worker.rx.try_recv() {
                 Ok(r) => r,
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
-                    self.pending_full_res = None;
-                    self.resume_preload();
+                    // Worker died; reset so the next nav respawns it.
+                    self.full_res_worker = None;
+                    self.full_res_pending = false;
+                    self.full_res_pending_since = None;
                     return;
                 }
-            }
-        };
-        let pending = self.pending_full_res.take().unwrap();
+            };
 
-        let current_path = self
-            .image_files
-            .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX))
-            .cloned();
-        if current_path.as_ref() != Some(&pending.path) {
-            log::debug!("Discarding stale full-res load for {}", pending.path.display());
-            // A newer navigation is already in flight and re-pauses on its own; resume here
-            // so the bulk worker can keep going if that newer load somehow never completes.
-            self.resume_preload();
+            let current_path = self
+                .image_files
+                .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX))
+                .cloned();
+            if current_path.as_ref() != Some(&reply.path) {
+                log::debug!("Discarding stale full-res reply for {}", reply.path.display());
+                continue;
+            }
+
+            self.full_res_pending = false;
+            self.full_res_pending_since = None;
+            match reply.result {
+                Ok(LoadedImage::Static(full_res)) => {
+                    let new_width = full_res.width() as f32;
+                    let preview_width = reply.preview_width as f32;
+                    if preview_width > 0.0 && new_width > 0.0 && !self.is_scaled_to_fit {
+                        // Preserve the user's current view: the displayed size of the image
+                        // (full_res_size * zoom) should stay the same across the swap.
+                        self.zoom *= preview_width / new_width;
+                    }
+                    self.display_loaded_image(full_res, &reply.path, ctx);
+                    log::info!("Swapped in full-res image: {}", reply.path.display());
+                    ctx.request_repaint();
+                }
+                Err(e) => {
+                    log::error!("Background full-res load failed for {}: {}", reply.path.display(), e);
+                }
+            }
             return;
         }
-
-        match result {
-            Ok(LoadedImage::Static(full_res)) => {
-                let new_width = full_res.width() as f32;
-                let preview_width = pending.preview_width as f32;
-                if preview_width > 0.0 && new_width > 0.0 && !self.is_scaled_to_fit {
-                    // Preserve the user's current view: the displayed size of the image
-                    // (full_res_size * zoom) should stay the same across the swap.
-                    self.zoom *= preview_width / new_width;
-                }
-                self.display_loaded_image(full_res, &pending.path, ctx);
-                log::info!("Swapped in full-res image: {}", pending.path.display());
-                ctx.request_repaint();
-            }
-            Err(e) => {
-                log::error!("Background full-res load failed for {}: {}", pending.path.display(), e);
-            }
-        }
-        self.resume_preload();
     }
 
     fn start_bulk_preload(&mut self) {
@@ -262,35 +305,41 @@ impl ImageViewerApp {
         if n <= 1 {
             return;
         }
-        // Walk the display order starting from current+1; the current image is the user's
-        // focus and doesn't need preloading.
+        // Bounce outward from current_index: +1, -1, +2, -2, ... so images closest to the
+        // user — in either direction — are preloaded first. A purely forward walk leaves
+        // backward navigation hitting un-preloaded images until the queue wraps around.
         let mut paths: Vec<PathBuf> = Vec::with_capacity(n - 1);
-        for i in 1..n {
-            let idx = (self.current_index + i) % n;
-            let order_idx = self.image_order[idx];
-            paths.push(self.image_files[order_idx].clone());
+        let mut seen = vec![false; n];
+        seen[self.current_index] = true;
+        let mut d = 1;
+        while paths.len() < n - 1 {
+            let fwd = (self.current_index + d) % n;
+            if !seen[fwd] {
+                seen[fwd] = true;
+                paths.push(self.image_files[self.image_order[fwd]].clone());
+            }
+            if paths.len() >= n - 1 { break; }
+            let back = (self.current_index + n - d) % n;
+            if !seen[back] {
+                seen[back] = true;
+                paths.push(self.image_files[self.image_order[back]].clone());
+            }
+            d += 1;
         }
-        // Start paused if a full-res load is already in flight, so the worker doesn't
-        // race the foreground decoder on app startup.
-        let initial_paused = self.pending_full_res.is_some();
         let state = Arc::new(PreloadState {
-            paused: AtomicBool::new(initial_paused),
             shutdown: AtomicBool::new(false),
         });
         self.preload_state = Some(state.clone());
-        thread::spawn(move || preload_worker(state, paths));
+        spawn_preload_workers(state, paths);
     }
 
-    fn pause_preload(&self) {
-        if let Some(s) = &self.preload_state {
-            s.paused.store(true, Ordering::Relaxed);
+    fn shutdown_workers(&mut self) {
+        if let Some(state) = &self.preload_state {
+            state.shutdown.store(true, Ordering::Relaxed);
         }
-    }
-
-    fn resume_preload(&self) {
-        if let Some(s) = &self.preload_state {
-            s.paused.store(false, Ordering::Relaxed);
-        }
+        // Dropping the worker drops the request Sender, which causes the worker
+        // thread's recv() to fail and exit.
+        self.full_res_worker = None;
     }
 
     fn copy_to_clipboard(&mut self) {
@@ -730,6 +779,12 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     }
 }
 
+impl Drop for ImageViewerApp {
+    fn drop(&mut self) {
+        self.shutdown_workers();
+    }
+}
+
 // --- Preload Cache ---
 
 const PRELOAD_CACHE_WIDTH: u32 = 1920;
@@ -809,34 +864,99 @@ fn load_preload_cache(path: &Path) -> Option<LoadedImage> {
     }
 }
 
-/// Long-lived worker that decodes every image in the directory once, saving preload caches.
-/// The worker honors `state.paused` between images so foreground loads get exclusive CPU,
-/// and exits when `state.shutdown` is set or when it has walked the whole list.
-fn preload_worker(state: Arc<PreloadState>, paths: Vec<PathBuf>) {
-    log::debug!("Bulk preload worker starting ({} images)", paths.len());
-    for path in paths {
+/// Spawn N worker threads that share a queue of paths to preload.
+/// Workers catch panics so a single bad file doesn't stall the rest of the queue,
+/// and exit when `state.shutdown` is set or the queue drains. They run continuously
+/// — the single latest-wins foreground decoder is enough on its own to keep the UI
+/// responsive, and pausing the bulk pool around navigation just left cores idle.
+fn spawn_preload_workers(state: Arc<PreloadState>, paths: Vec<PathBuf>) {
+    // Use all available cores minus one (leave a core for the UI / foreground decoder).
+    let n_workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .saturating_sub(1)
+        .max(1);
+    let queue = Arc::new(Mutex::new(VecDeque::from(paths)));
+    log::debug!(
+        "Bulk preload starting with {} workers ({} images)",
+        n_workers,
+        queue.lock().map(|q| q.len()).unwrap_or(0)
+    );
+    for _ in 0..n_workers {
+        let state = state.clone();
+        let queue = queue.clone();
+        thread::spawn(move || preload_worker_loop(state, queue));
+    }
+}
+
+fn preload_worker_loop(state: Arc<PreloadState>, queue: Arc<Mutex<VecDeque<PathBuf>>>) {
+    loop {
         if state.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        while state.paused.load(Ordering::Relaxed) {
-            if state.shutdown.load(Ordering::Relaxed) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
+        let path = match queue.lock() {
+            Ok(mut q) => q.pop_front(),
+            Err(_) => return,
+        };
+        let Some(path) = path else { return };
         if preload_cache_path(&path).exists() {
             continue;
         }
-        match decode_image_data(&path) {
-            Ok(img) => {
+        // catch_unwind: a panicking decoder (rare, but possible on malformed RAW/FITS)
+        // must not take the worker thread down — the queue keeps draining.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decode_image_data(&path)
+        }));
+        match outcome {
+            Ok(Ok(img)) => {
                 if let Err(e) = save_preload_cache(&img, &path) {
                     log::warn!("Bulk preload save failed for {}: {}", path.display(), e);
                 }
             }
-            Err(e) => log::debug!("Bulk preload decode failed for {}: {}", path.display(), e),
+            Ok(Err(e)) => log::debug!("Bulk preload decode failed for {}: {}", path.display(), e),
+            Err(_) => log::warn!("Bulk preload decode panicked for {}", path.display()),
         }
     }
-    log::info!("Bulk preload worker finished");
+}
+
+/// Spawn the long-lived full-res worker. It blocks on the request channel and,
+/// each iteration, drains all queued requests keeping only the most recent — so a
+/// burst of rapid navigation results in at most one wasted decode before the
+/// worker catches up to the image the user actually settled on.
+fn spawn_full_res_worker(ctx: egui::Context) -> FullResWorker {
+    let (req_tx, req_rx) = channel::<FullResRequest>();
+    let (reply_tx, reply_rx) = channel::<FullResReply>();
+    thread::spawn(move || full_res_worker_loop(req_rx, reply_tx, ctx));
+    FullResWorker { tx: req_tx, rx: reply_rx }
+}
+
+fn full_res_worker_loop(
+    req_rx: Receiver<FullResRequest>,
+    reply_tx: Sender<FullResReply>,
+    ctx: egui::Context,
+) {
+    loop {
+        let mut latest = match req_rx.recv() {
+            Ok(r) => r,
+            Err(_) => return, // App dropped — exit.
+        };
+        // Drain any newer requests that piled up while we were idle/decoding.
+        while let Ok(newer) = req_rx.try_recv() {
+            latest = newer;
+        }
+        let path = latest.path.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_image(&path)))
+            .unwrap_or_else(|_| Err(format!("decoder panicked for {}", path.display())));
+        let reply = FullResReply {
+            path: latest.path,
+            preview_width: latest.preview_width,
+            result,
+        };
+        if reply_tx.send(reply).is_err() {
+            return;
+        }
+        ctx.request_repaint();
+    }
 }
 
 fn clear_old_preload_cache() {
