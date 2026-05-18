@@ -3,8 +3,9 @@ name: Publish to WinGet
 # Fires once a GitHub release has been *published* (i.e. the deploy job in
 # release.yml uploaded all the assets and the release became visible).
 on:
-  release:
-    types: [released]
+  workflow_run:
+    workflows: ["Rust"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -14,6 +15,13 @@ on:
 jobs:
   winget:
     runs-on: ubuntu-latest
+    # Run for manual dispatch, or when the Rust workflow finishes successfully
+    # for a tag push (head_branch will be the tag name, e.g. "v2.5.1").
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     steps:
       - name: Submit manifest to winget-pkgs
         uses: vedantmgoyal2009/winget-releaser@v2
@@ -23,8 +31,8 @@ jobs:
           identifier: dividebysandwich.LightningView
           # Glob that picks the asset(s) to publish. We ship a single x86_64 zip.
           installers-regex: 'lightningview-x86_64-pc-windows-msvc-.*\.zip$'
-          # Use the input tag for manual runs, otherwise the tag from the release event.
-          release-tag: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          # Use the input tag for manual runs, otherwise the tag from the workflow_run event.
+          release-tag: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
           # Personal access token (classic) with `public_repo` scope, belonging to a
           # GitHub account that has forked microsoft/winget-pkgs. Stored as a repo secret.
           token: ${{ secrets.WINGET_TOKEN }}

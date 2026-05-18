@@ -4,8 +4,9 @@ name: Update Scoop manifest
 # Computes the SHA-256 of the published Windows zip and commits the new
 # version + hash back to main.
 on:
-  release:
-    types: [released]
+  workflow_run:
+    workflows: ["Rust"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -18,13 +19,20 @@ permissions:
 jobs:
   update-manifest:
     runs-on: ubuntu-latest
+    # Run for manual dispatch, or when the Rust workflow finishes successfully
+    # for a tag push (head_branch will be the tag name, e.g. "v2.5.1").
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     steps:
       - uses: actions/checkout@v4
 
       - name: Compute new version + hash
         id: meta
         env:
-          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
         run: |
           # Strip a leading "v" for the manifest version field
           VERSION="${TAG#v}"
