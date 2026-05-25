@@ -23,6 +23,7 @@ rawler = { git = "https://patched@github.com/dividebysandwich/dnglab.git", rev="
 imagepipe = { git = "https://github.com/dividebysandwich/imagepipe", rev="cc9df677"}
 rayon = "1.12.0"
 jxl-oxide = { version = "0.12", features = ["image"] }
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_UI_Shell"]}
