@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender, TryRecvError},
     },
     thread,
@@ -80,10 +80,12 @@ struct FullResWorker {
 }
 
 /// Shared control flag for the long-lived bulk preload workers.
-/// Workers run continuously — the foreground full-res decoder is a single latest-wins
-/// thread, so there's no need to throttle bulk preload around navigation any more.
+/// `pause` is set while a foreground full-res decode is in flight so the OS scheduler
+/// gives the foreground thread effectively all the CPU — without this the user's
+/// "switch to next image" decode shares cores with N-1 bulk decoders and stalls.
 struct PreloadState {
     shutdown: AtomicBool,
+    pause: AtomicBool,
 }
 
 // Simplified enum for loaded image data before GPU upload
@@ -170,17 +172,12 @@ impl ImageViewerApp {
             self.display_loaded_image(to_egui_color_image(thumb), &path, ctx);
             self.start_full_res_load(path, ctx);
         } else {
-            match load_image(&path) {
-                Ok(LoadedImage::Static(full_res_image)) => {
-                    self.display_loaded_image(full_res_image, &path, ctx);
-                    log::info!("Loaded '{}' in {:.2?}", path.display(), start_time.elapsed());
-                }
-                Err(e) => {
-                    self.last_error = Some(e.clone());
-                    self.image = None;
-                    log::error!("Failed to load image: {}", e);
-                }
-            }
+            // No preview available. Route the decode through the worker so the UI
+            // thread stays responsive and the user can keep navigating; the central
+            // panel will render a "Loading…" placeholder until the reply arrives.
+            self.image = None;
+            self.last_error = None;
+            self.start_full_res_load(path, ctx);
         }
         ctx.request_repaint();
     }
@@ -212,6 +209,11 @@ impl ImageViewerApp {
     }
 
     fn start_full_res_load(&mut self, path: PathBuf, ctx: &egui::Context) {
+        // Starve bulk preload of CPU while the foreground decode is pending — the
+        // user's currently-viewed image takes priority over speculative cache fills.
+        if let Some(state) = &self.preload_state {
+            state.pause.store(true, Ordering::Relaxed);
+        }
         let preview_width = self
             .image
             .as_ref()
@@ -249,6 +251,9 @@ impl ImageViewerApp {
                     self.full_res_worker = None;
                     self.full_res_pending = false;
                     self.full_res_pending_since = None;
+                    if let Some(state) = &self.preload_state {
+                        state.pause.store(false, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -264,6 +269,9 @@ impl ImageViewerApp {
                     self.full_res_worker = None;
                     self.full_res_pending = false;
                     self.full_res_pending_since = None;
+                    if let Some(state) = &self.preload_state {
+                        state.pause.store(false, Ordering::Relaxed);
+                    }
                     return;
                 }
             };
@@ -279,6 +287,9 @@ impl ImageViewerApp {
 
             self.full_res_pending = false;
             self.full_res_pending_since = None;
+            if let Some(state) = &self.preload_state {
+                state.pause.store(false, Ordering::Relaxed);
+            }
             match reply.result {
                 Ok(LoadedImage::Static(full_res)) => {
                     let new_width = full_res.width() as f32;
@@ -294,6 +305,10 @@ impl ImageViewerApp {
                 }
                 Err(e) => {
                     log::error!("Background full-res load failed for {}: {}", reply.path.display(), e);
+                    // If there was no preview to fall back on, surface the error.
+                    if self.image.is_none() {
+                        self.last_error = Some(e);
+                    }
                 }
             }
             return;
@@ -332,6 +347,9 @@ impl ImageViewerApp {
         }
         let state = Arc::new(PreloadState {
             shutdown: AtomicBool::new(false),
+            // Mirror current foreground state so a brand-new preload pool doesn't
+            // immediately race the in-flight decode it should be yielding to.
+            pause: AtomicBool::new(self.full_res_pending),
         });
         self.preload_state = Some(state.clone());
         spawn_preload_workers(state, paths);
@@ -379,58 +397,117 @@ impl ImageViewerApp {
             }
         };
 
-        let all_supported_formats: Vec<&str> = [
-            &IMAGEREADER_SUPPORTED_FORMATS[..],
-            &ANIM_SUPPORTED_FORMATS[..],
-            &IMAGE_RS_SUPPORTED_FORMATS[..],
-            &RAW_SUPPORTED_FORMATS[..],
-            &FITS_SUPPORTED_FORMATS[..],
-            &JXL_SUPPORTED_FORMATS[..],
-        ]
-        .concat();
+        let files = scan_supported_images(parent_dir);
 
-        if let Ok(entries) = fs::read_dir(parent_dir) {
-            let mut files: Vec<PathBuf> = entries
-                .filter_map(|entry| entry.ok().map(|e| e.path()))
-                .filter(|path| {
-                    if !path.is_file() {
-                        return false;
-                    }
-                    let path_str = path.to_string_lossy().to_lowercase();
-                    all_supported_formats.iter().any(|format| path_str.ends_with(format))
-                })
-                .collect();
-
-            files.sort_by_key(|name| name.to_string_lossy().to_lowercase());
-
-            if let Some(index) = files.iter().position(|p| p == file_path) {
-                self.current_index = index;
-            }
-
-            self.image_files = files;
-            self.image_order = (0..self.image_files.len()).collect();
+        if let Some(index) = files.iter().position(|p| p == file_path) {
+            self.current_index = index;
         }
+
+        self.image_files = files;
+        self.image_order = (0..self.image_files.len()).collect();
     }
-    
+
+    /// Re-scan the parent directory so files added/removed externally show up the
+    /// next time the user navigates. Keeps the currently-viewed image in place,
+    /// preserves random-order traversal, and only restarts bulk preload if the
+    /// listing actually changed (so this is cheap to call on every navigation).
+    fn refresh_directory(&mut self) {
+        let parent_dir = match self
+            .image_files
+            .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX))
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .or_else(|| self.image_files.first().and_then(|p| p.parent()).map(|p| p.to_path_buf()))
+        {
+            Some(p) => p,
+            None => return,
+        };
+
+        let new_files = scan_supported_images(&parent_dir);
+        if new_files == self.image_files {
+            return;
+        }
+
+        log::info!(
+            "Directory contents changed: {} -> {} files",
+            self.image_files.len(),
+            new_files.len()
+        );
+
+        let current_path = self
+            .image_files
+            .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX))
+            .cloned();
+
+        if self.is_randomized {
+            // Preserve the user's random traversal order: walk the old order, drop
+            // entries whose path no longer exists, then append any new files.
+            let old_path_order: Vec<PathBuf> = self
+                .image_order
+                .iter()
+                .filter_map(|&i| self.image_files.get(i).cloned())
+                .collect();
+            let mut new_order = Vec::with_capacity(new_files.len());
+            let mut seen = vec![false; new_files.len()];
+            for path in &old_path_order {
+                if let Some(idx) = new_files.iter().position(|p| p == path) {
+                    if !seen[idx] {
+                        seen[idx] = true;
+                        new_order.push(idx);
+                    }
+                }
+            }
+            for (idx, was_seen) in seen.iter().enumerate() {
+                if !was_seen {
+                    new_order.push(idx);
+                }
+            }
+            self.image_order = new_order;
+        } else {
+            self.image_order = (0..new_files.len()).collect();
+        }
+
+        self.image_files = new_files;
+
+        // Restore current_index to point at the same path. If that file was deleted
+        // externally we clamp so the next nav step lands on a valid entry.
+        if let Some(cp) = current_path {
+            if let Some(file_idx) = self.image_files.iter().position(|p| p == &cp) {
+                if let Some(order_idx) = self.image_order.iter().position(|&i| i == file_idx) {
+                    self.current_index = order_idx;
+                }
+            } else if self.current_index >= self.image_order.len() {
+                self.current_index = self.image_order.len().saturating_sub(1);
+            }
+        }
+
+        // New files may need preloading; restart the bulk pool with the updated set.
+        self.start_bulk_preload();
+    }
+
     fn next_image(&mut self, ctx: &egui::Context) {
+        self.refresh_directory();
         if !self.image_files.is_empty() {
             self.load_image_at_index((self.current_index + 1) % self.image_files.len(), ctx);
         }
     }
-    
+
     fn prev_image(&mut self, ctx: &egui::Context) {
+        self.refresh_directory();
         if !self.image_files.is_empty() {
             self.load_image_at_index((self.current_index + self.image_files.len() - 1) % self.image_files.len(), ctx);
         }
     }
-    
+
     fn first_image(&mut self, ctx: &egui::Context) {
+        self.refresh_directory();
         if !self.image_files.is_empty() {
             self.load_image_at_index(0, ctx);
         }
     }
-    
+
     fn last_image(&mut self, ctx: &egui::Context) {
+        self.refresh_directory();
         if !self.image_files.is_empty() {
             self.load_image_at_index(self.image_files.len() - 1, ctx);
         }
@@ -736,6 +813,17 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             } else if let Some(err) = &self.last_error {
                 ui.centered_and_justified(|ui| {
                     ui.label(egui::RichText::new(err).color(Color32::RED).size(18.0));
+                });
+            } else if self.full_res_pending {
+                let current_path = self
+                    .image_files
+                    .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX));
+                let label = match current_path {
+                    Some(p) => format!("Loading {}…", p.display()),
+                    None => "Loading…".to_string(),
+                };
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new(label).color(Color32::from_gray(180)).size(18.0));
                 });
             }
         });
@@ -1051,6 +1139,15 @@ fn preload_worker_loop(state: Arc<PreloadState>, queue: Arc<Mutex<VecDeque<PathB
         if state.shutdown.load(Ordering::Relaxed) {
             return;
         }
+        // Yield to the foreground full-res decoder while it has work in flight.
+        // Polling-with-sleep is intentional: a foreground decode is bounded by
+        // FULL_RES_WATCHDOG, so we can't deadlock here.
+        while state.pause.load(Ordering::Relaxed) {
+            if state.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
         let path = match queue.lock() {
             Ok(mut q) => q.pop_front(),
             Err(_) => return,
@@ -1076,43 +1173,61 @@ fn preload_worker_loop(state: Arc<PreloadState>, queue: Arc<Mutex<VecDeque<PathB
     }
 }
 
-/// Spawn the long-lived full-res worker. It blocks on the request channel and,
-/// each iteration, drains all queued requests keeping only the most recent — so a
-/// burst of rapid navigation results in at most one wasted decode before the
-/// worker catches up to the image the user actually settled on.
+/// Spawn the full-res worker dispatcher. The dispatcher is a lightweight thread
+/// that accepts requests and immediately spawns a fresh decode thread for each,
+/// so the user's *latest* navigation starts decoding right away instead of
+/// waiting for a previously-started decode to finish. A shared generation
+/// counter lets stale decodes (whose result the user no longer cares about)
+/// drop their results when they eventually finish.
 fn spawn_full_res_worker(ctx: egui::Context) -> FullResWorker {
     let (req_tx, req_rx) = channel::<FullResRequest>();
     let (reply_tx, reply_rx) = channel::<FullResReply>();
-    thread::spawn(move || full_res_worker_loop(req_rx, reply_tx, ctx));
+    thread::spawn(move || full_res_dispatcher_loop(req_rx, reply_tx, ctx));
     FullResWorker { tx: req_tx, rx: reply_rx }
 }
 
-fn full_res_worker_loop(
+fn full_res_dispatcher_loop(
     req_rx: Receiver<FullResRequest>,
     reply_tx: Sender<FullResReply>,
     ctx: egui::Context,
 ) {
+    // Bumped on every accepted request; a decode thread only sends its reply if
+    // its generation still matches when the decode finishes.
+    let generation = Arc::new(AtomicU64::new(0));
     loop {
-        let mut latest = match req_rx.recv() {
+        let mut req = match req_rx.recv() {
             Ok(r) => r,
             Err(_) => return, // App dropped — exit.
         };
-        // Drain any newer requests that piled up while we were idle/decoding.
+        // Coalesce any requests already queued in the channel. New requests that
+        // arrive *during* decoding will spawn their own thread below; this drain
+        // only avoids spawning N decoders when a burst arrives faster than we
+        // can route it.
         while let Ok(newer) = req_rx.try_recv() {
-            latest = newer;
+            req = newer;
         }
-        let path = latest.path.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_image(&path)))
-            .unwrap_or_else(|_| Err(format!("decoder panicked for {}", path.display())));
-        let reply = FullResReply {
-            path: latest.path,
-            preview_width: latest.preview_width,
-            result,
-        };
-        if reply_tx.send(reply).is_err() {
-            return;
-        }
-        ctx.request_repaint();
+        let my_gen = generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let reply_tx = reply_tx.clone();
+        let ctx2 = ctx.clone();
+        let generation2 = generation.clone();
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_image(&req.path)))
+                .unwrap_or_else(|_| Err(format!("decoder panicked for {}", req.path.display())));
+            // If a newer request has been accepted while we were decoding, this
+            // result is no longer wanted — silently drop it.
+            if generation2.load(Ordering::Relaxed) != my_gen {
+                log::debug!("Discarding stale decode result for {}", req.path.display());
+                return;
+            }
+            let reply = FullResReply {
+                path: req.path,
+                preview_width: req.preview_width,
+                result,
+            };
+            if reply_tx.send(reply).is_ok() {
+                ctx2.request_repaint();
+            }
+        });
     }
 }
 
@@ -1258,6 +1373,37 @@ fn rgb_to_grayscale(rgb_image: Result<Array<f32, IxDyn>, Box<dyn Error>>) -> Res
         return Err("Invalid shape: Expected (H, W, 3)".into());
     }
     Ok(&rgb_array.slice(s![.., .., 0]) * 0.2989 + &rgb_array.slice(s![.., .., 1]) * 0.5870 + &rgb_array.slice(s![.., .., 2]) * 0.1140)
+}
+
+/// Read `dir` and return every supported image file inside it, sorted by
+/// lowercased filename so the listing is stable across calls.
+fn scan_supported_images(dir: &Path) -> Vec<PathBuf> {
+    let all_supported_formats: Vec<&str> = [
+        &IMAGEREADER_SUPPORTED_FORMATS[..],
+        &ANIM_SUPPORTED_FORMATS[..],
+        &IMAGE_RS_SUPPORTED_FORMATS[..],
+        &RAW_SUPPORTED_FORMATS[..],
+        &FITS_SUPPORTED_FORMATS[..],
+        &JXL_SUPPORTED_FORMATS[..],
+    ]
+    .concat();
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            if !path.is_file() {
+                return false;
+            }
+            let path_str = path.to_string_lossy().to_lowercase();
+            all_supported_formats.iter().any(|format| path_str.ends_with(format))
+        })
+        .collect();
+    files.sort_by_key(|name| name.to_string_lossy().to_lowercase());
+    files
 }
 
 fn get_absolute_path(filename: &str) -> Result<PathBuf, String> {
