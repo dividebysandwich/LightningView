@@ -1,0 +1,166 @@
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{channel, Receiver, Sender},
+    },
+    thread,
+    time::Duration,
+};
+
+use crate::cache::{preload_cache_path, save_preload_cache};
+use crate::decode::{decode_image_data, load_image};
+use crate::types::{FullResReply, FullResRequest, FullResWorker, MemoryGate, PreloadState};
+
+/// Spawn N worker threads that share a queue of paths to preload.
+/// Workers catch panics so a single bad file doesn't stall the rest of the queue,
+/// and exit when `state.shutdown` is set or the queue drains. They run continuously
+/// — the single latest-wins foreground decoder is enough on its own to keep the UI
+/// responsive, and pausing the bulk pool around navigation just left cores idle.
+pub fn spawn_preload_workers(state: Arc<PreloadState>, paths: Vec<PathBuf>) {
+    // Use all available cores minus one (leave a core for the UI / foreground decoder).
+    let n_workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .saturating_sub(1)
+        .max(1);
+    let queue = Arc::new(Mutex::new(VecDeque::from(paths)));
+    log::debug!(
+        "Bulk preload starting with {} workers ({} images)",
+        n_workers,
+        queue.lock().map(|q| q.len()).unwrap_or(0)
+    );
+    for _ in 0..n_workers {
+        let state = state.clone();
+        let queue = queue.clone();
+        thread::spawn(move || preload_worker_loop(state, queue));
+    }
+}
+
+fn preload_worker_loop(state: Arc<PreloadState>, queue: Arc<Mutex<VecDeque<PathBuf>>>) {
+    loop {
+        if state.shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        // Yield to the foreground full-res decoder while it has work in flight.
+        // Polling-with-sleep is intentional: a foreground decode is bounded by
+        // FULL_RES_WATCHDOG, so we can't deadlock here.
+        while state.pause.load(Ordering::Relaxed) {
+            if state.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let path = match queue.lock() {
+            Ok(mut q) => q.pop_front(),
+            Err(_) => return,
+        };
+        let Some(path) = path else { return };
+        if preload_cache_path(&path).exists() {
+            continue;
+        }
+        // Wait for a memory slot before allocating decoder buffers. This is what
+        // keeps a roomful of N bulk workers from collectively running the box out
+        // of RAM on a directory of large RAW/FITS files.
+        loop {
+            if state.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            // Continue yielding to foreground decodes that may have started
+            // while we were idle.
+            if state.pause.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            if state.gate.try_acquire() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        // catch_unwind: a panicking decoder (rare, but possible on malformed RAW/FITS)
+        // must not take the worker thread down — the queue keeps draining.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decode_image_data(&path)
+        }));
+        state.gate.release();
+        match outcome {
+            Ok(Ok(img)) => {
+                if let Err(e) = save_preload_cache(&img, &path) {
+                    log::warn!("Bulk preload save failed for {}: {}", path.display(), e);
+                }
+            }
+            Ok(Err(e)) => log::debug!("Bulk preload decode failed for {}: {}", path.display(), e),
+            Err(_) => log::warn!("Bulk preload decode panicked for {}", path.display()),
+        }
+    }
+}
+
+/// Spawn the full-res worker dispatcher. The dispatcher is a lightweight thread
+/// that accepts requests and (memory permitting) immediately spawns a fresh
+/// decode thread for each, so the user's *latest* navigation starts decoding
+/// right away instead of waiting for a previously-started decode to finish. A
+/// shared generation counter lets stale decodes (whose result the user no
+/// longer cares about) drop their results when they eventually finish. The
+/// `MemoryGate` caps concurrency so a burst of rapid navigation can't OOM the
+/// system on large RAW/FITS files.
+pub fn spawn_full_res_worker(ctx: egui::Context, gate: Arc<MemoryGate>) -> FullResWorker {
+    let (req_tx, req_rx) = channel::<FullResRequest>();
+    let (reply_tx, reply_rx) = channel::<FullResReply>();
+    thread::spawn(move || full_res_dispatcher_loop(req_rx, reply_tx, ctx, gate));
+    FullResWorker { tx: req_tx, rx: reply_rx }
+}
+
+fn full_res_dispatcher_loop(
+    req_rx: Receiver<FullResRequest>,
+    reply_tx: Sender<FullResReply>,
+    ctx: egui::Context,
+    gate: Arc<MemoryGate>,
+) {
+    // Bumped on every accepted request; a decode thread only sends its reply if
+    // its generation still matches when the decode finishes.
+    let generation = Arc::new(AtomicU64::new(0));
+    loop {
+        let mut req = match req_rx.recv() {
+            Ok(r) => r,
+            Err(_) => return, // App dropped — exit.
+        };
+        // While we wait for a memory slot, keep draining newer requests so the
+        // decode we eventually start is for the freshest navigation target.
+        loop {
+            while let Ok(newer) = req_rx.try_recv() {
+                req = newer;
+            }
+            if gate.try_acquire() {
+                break;
+            }
+            log::debug!("Foreground decoder waiting for memory slot");
+            thread::sleep(Duration::from_millis(100));
+        }
+        let my_gen = generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let reply_tx = reply_tx.clone();
+        let ctx2 = ctx.clone();
+        let generation2 = generation.clone();
+        let gate2 = gate.clone();
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_image(&req.path)))
+                .unwrap_or_else(|_| Err(format!("decoder panicked for {}", req.path.display())));
+            gate2.release();
+            // If a newer request has been accepted while we were decoding, this
+            // result is no longer wanted — silently drop it.
+            if generation2.load(Ordering::Relaxed) != my_gen {
+                log::debug!("Discarding stale decode result for {}", req.path.display());
+                return;
+            }
+            let reply = FullResReply {
+                path: req.path,
+                preview_width: req.preview_width,
+                result,
+            };
+            if reply_tx.send(reply).is_ok() {
+                ctx2.request_repaint();
+            }
+        });
+    }
+}
