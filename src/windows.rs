@@ -7,7 +7,7 @@ use std::{
 };
 use winreg::{enums::*, RegKey};
 
-use crate::{IMAGE_RS_SUPPORTED_FORMATS, FITS_SUPPORTED_FORMATS, IMAGEREADER_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS};
+use crate::formats::{IMAGE_RS_SUPPORTED_FORMATS, FITS_SUPPORTED_FORMATS, IMAGEREADER_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS};
 const CANONICAL_NAME: &str = "lightningview.exe";
 const PROGID: &str = "LightningViewImageFile";
 

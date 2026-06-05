@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "lightningview"
-version = "2.5.3"
+version = "2.5.4"
 dependencies = [
  "arboard",
  "const_format",
