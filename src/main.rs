@@ -55,6 +55,8 @@ struct DisplayableImage {
     tile_cache: HashMap<(usize, usize), (TextureHandle, [usize; 2])>,
     /// Does this image actually need tiling, or is it small enough to fit on the GPU?
     needs_tiling: bool,
+    /// Animation playback state for animated images (e.g. GIFs). `None` for stills.
+    animation: Option<Animation>,
 }
 
 /// Request sent to the long-lived full-res decoder worker.
@@ -157,11 +159,27 @@ impl MemoryGate {
     }
 }
 
+/// One frame of an animated image (e.g. GIF), already composited to the full
+/// canvas, plus how long it should be shown before advancing.
+struct AnimationFrame {
+    image: ColorImage,
+    delay: Duration,
+}
+
+/// Playback state for an animated image. All frames are decoded up front; the UI
+/// advances `current` based on wall-clock time and re-uploads the active frame to
+/// the displayable image's `preview_texture` whenever it changes.
+struct Animation {
+    frames: Vec<AnimationFrame>,
+    current: usize,
+    /// When the currently-displayed frame began showing.
+    frame_started: Instant,
+}
+
 // Simplified enum for loaded image data before GPU upload
 enum LoadedImage {
     Static(ColorImage),
-    // For simplicity, this advanced example will treat GIFs as static, showing the first frame.
-    // A fully tiled animated viewer is significantly more complex.
+    Animated(Vec<AnimationFrame>),
 }
 
 // --- Main Application State ---
@@ -275,6 +293,35 @@ impl ImageViewerApp {
             preview_texture,
             tile_cache: HashMap::new(),
             needs_tiling,
+            animation: None,
+        });
+
+        self.last_error = None;
+    }
+
+    /// Install an animated image for playback. Animated frames always render via
+    /// the simple (non-tiled) preview path: each tick the UI swaps `preview_texture`
+    /// for the active frame, so we never tile them. The first frame is shown
+    /// immediately and `full_res_image` tracks the displayed frame (used for sizing
+    /// and clipboard copies).
+    fn display_animated_image(&mut self, frames: Vec<AnimationFrame>, path: &Path, ctx: &egui::Context) {
+        let first_frame = frames[0].image.clone();
+        let preview_texture = ctx.load_texture(
+            format!("{}_anim", path.display()),
+            first_frame.clone(),
+            Default::default(),
+        );
+
+        self.image = Some(DisplayableImage {
+            full_res_image: first_frame,
+            preview_texture,
+            tile_cache: HashMap::new(),
+            needs_tiling: false,
+            animation: Some(Animation {
+                frames,
+                current: 0,
+                frame_started: Instant::now(),
+            }),
         });
 
         self.last_error = None;
@@ -363,15 +410,23 @@ impl ImageViewerApp {
                 state.pause.store(false, Ordering::Relaxed);
             }
             match reply.result {
-                Ok(LoadedImage::Static(full_res)) => {
-                    let new_width = full_res.width() as f32;
+                Ok(loaded) => {
+                    let new_width = match &loaded {
+                        LoadedImage::Static(img) => img.width() as f32,
+                        LoadedImage::Animated(frames) => {
+                            frames.first().map(|f| f.image.width()).unwrap_or(0) as f32
+                        }
+                    };
                     let preview_width = reply.preview_width as f32;
                     if preview_width > 0.0 && new_width > 0.0 && !self.is_scaled_to_fit {
                         // Preserve the user's current view: the displayed size of the image
                         // (full_res_size * zoom) should stay the same across the swap.
                         self.zoom *= preview_width / new_width;
                     }
-                    self.display_loaded_image(full_res, &reply.path, ctx);
+                    match loaded {
+                        LoadedImage::Static(full_res) => self.display_loaded_image(full_res, &reply.path, ctx),
+                        LoadedImage::Animated(frames) => self.display_animated_image(frames, &reply.path, ctx),
+                    }
                     log::info!("Swapped in full-res image: {}", reply.path.display());
                     ctx.request_repaint();
                 }
@@ -645,6 +700,47 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
         .show_inside(ui, |ui| {
             if let Some(image) = &mut self.image {
+                // Advance animation playback (GIFs). Frames are pre-decoded; we step
+                // forward by wall-clock time and re-upload the active frame whenever it
+                // changes, then schedule a repaint for when the next frame is due.
+                if let Some(anim) = &mut image.animation {
+                    if anim.frames.len() > 1 {
+                        let mut changed = false;
+                        // Advance past every frame whose display time has elapsed. The
+                        // step cap guards against a stalled UI (or pathological tiny
+                        // delays) making us spin through the whole animation.
+                        let mut steps = 0;
+                        while steps < anim.frames.len()
+                            && anim.frame_started.elapsed() >= anim.frames[anim.current].delay
+                        {
+                            anim.frame_started += anim.frames[anim.current].delay;
+                            anim.current = (anim.current + 1) % anim.frames.len();
+                            changed = true;
+                            steps += 1;
+                        }
+                        // If we were so far behind we hit the cap, resync to "now" so we
+                        // don't keep racing to catch up frame-by-frame.
+                        if steps == anim.frames.len() {
+                            anim.frame_started = Instant::now();
+                        }
+                        if changed {
+                            let frame_image = anim.frames[anim.current].image.clone();
+                            image.preview_texture = ctx.load_texture(
+                                "anim_frame",
+                                frame_image.clone(),
+                                Default::default(),
+                            );
+                            // Keep full_res_image pointed at the displayed frame so
+                            // clipboard copies grab what the user actually sees.
+                            image.full_res_image = frame_image;
+                        }
+                        let remaining = anim.frames[anim.current]
+                            .delay
+                            .saturating_sub(anim.frame_started.elapsed());
+                        ctx.request_repaint_after(remaining);
+                    }
+                }
+
                 let available_rect = ui.available_rect_before_wrap();
                 let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
 
@@ -1378,9 +1474,42 @@ fn decode_image_data(path: &Path) -> Result<DynamicImage, String> {
 }
 
 fn load_image(path: &Path) -> Result<LoadedImage, String> {
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if ANIM_SUPPORTED_FORMATS.contains(&extension.as_str()) {
+        return load_animated_gif(&path.to_string_lossy());
+    }
     let dynamic_image = decode_image_data(path)?;
     let _ = save_preload_cache(&dynamic_image, path);
     Ok(LoadedImage::Static(to_egui_color_image(dynamic_image)))
+}
+
+/// Decode every frame of an animated GIF into already-composited RGBA frames with
+/// their delays. The `image` crate's GIF `AnimationDecoder` handles frame
+/// disposal/compositing, so each returned frame is a full-canvas image. A
+/// single-frame GIF is returned as a plain static image so it takes the normal
+/// (tile-capable) render path.
+fn load_animated_gif(path: &str) -> Result<LoadedImage, String> {
+    let file = fs::File::open(path).map_err(|e| format!("Failed to open GIF: {}", e))?;
+    let reader = BufReader::new(file);
+    let decoder = GifDecoder::new(reader).map_err(|e| format!("Failed to create GIF decoder: {}", e))?;
+
+    let mut frames = Vec::new();
+    for (i, frame) in decoder.into_frames().enumerate() {
+        let frame = frame.map_err(|e| format!("Failed to decode GIF frame {}: {}", i, e))?;
+        // Clamp absurdly short / zero delays (common in GIFs) to a sane minimum so
+        // playback doesn't peg the CPU; this matches typical browser behavior.
+        let delay = Duration::from(frame.delay()).max(Duration::from_millis(20));
+        let buffer = frame.into_buffer();
+        let dims = buffer.dimensions();
+        let image = ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], buffer.as_raw());
+        frames.push(AnimationFrame { image, delay });
+    }
+
+    match frames.len() {
+        0 => Err("GIF has no frames".to_string()),
+        1 => Ok(LoadedImage::Static(frames.pop().unwrap().image)),
+        _ => Ok(LoadedImage::Animated(frames)),
+    }
 }
 
 fn load_jxl(path: &str) -> Result<DynamicImage, String> {
