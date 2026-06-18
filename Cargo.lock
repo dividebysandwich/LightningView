@@ -2071,7 +2071,7 @@ dependencies = [
  "log",
  "multicache",
  "num-traits",
- "rawler 0.7.1",
+ "rawler",
  "rayon",
  "serde",
  "serde_derive",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "lightningview"
-version = "2.5.4"
+version = "2.5.5"
 dependencies = [
  "arboard",
  "const_format",
@@ -2574,8 +2574,8 @@ dependencies = [
  "jxl-oxide",
  "log",
  "ndarray",
- "rand 0.10.0",
- "rawler 0.7.2",
+ "rand 0.10.1",
+ "rawler",
  "rayon",
  "rustronomy-fits",
  "sysinfo",
@@ -3713,9 +3713,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc266eb313df6c5c09c1c7b1fbe2510961e5bcd3add930c1e31f7ed9da0feff8"
+checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
  "chacha20",
  "getrandom 0.4.2",
@@ -3823,41 +3823,8 @@ dependencies = [
 
 [[package]]
 name = "rawler"
-version = "0.7.1"
-source = "git+https://patched@github.com/dividebysandwich/dnglab.git?rev=c94bde3#c94bde31c1fe1ba18c76350924ff9d583eab7ab4"
-dependencies = [
- "backtrace",
- "bitstream-io",
- "byteorder",
- "chrono",
- "enumn",
- "glob",
- "hex",
- "image 0.25.10",
- "itertools",
- "jxl-oxide",
- "lazy_static",
- "libflate",
- "log",
- "md5",
- "memmap2",
- "multiversion",
- "num",
- "num_enum",
- "rayon",
- "rustc_version",
- "serde",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "uuid",
- "weezl",
- "zerocopy",
-]
-
-[[package]]
-name = "rawler"
 version = "0.7.2"
-source = "git+https://patched@github.com/dividebysandwich/dnglab.git?rev=83351fd#83351fd41b4c281cce9bddde692a6f8f7f0ba2b8"
+source = "git+https://patched@github.com/dividebysandwich/dnglab.git?rev=06dc3dab#06dc3dab645e12b921f75cff23e0c158e5eed4a9"
 dependencies = [
  "backtrace",
  "bitstream-io",
