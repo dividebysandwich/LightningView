@@ -612,7 +612,10 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
                 if response.dragged_by(egui::PointerButton::Primary) {
                     let delta = response.drag_delta();
                     self.offset += delta;
-                    self.velocity = delta; // Capture momentum
+                    // Capture momentum as a smoothed average of recent motion rather than
+                    // a single frame's delta. This makes the fling reflect the overall
+                    // gesture and stops a brief pause right before release from killing it.
+                    self.velocity = self.velocity * 0.4 + delta * 0.6;
                     self.is_scaled_to_fit = false;
                     is_interacting = true;
                 } else {
