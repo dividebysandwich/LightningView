@@ -105,6 +105,38 @@ fn load_jpeg_scaled(path: &Path, max_dim: u32) -> Option<DynamicImage> {
     }
 }
 
+/// Read just the JPEG header (markers up to start-of-scan) to get the pixel
+/// dimensions without decoding any image data. Used to decide whether a scaled
+/// preview decode is actually worthwhile — for an image that's already near the
+/// preview size, scaling buys nothing and would just decode the file twice.
+pub fn jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let file = fs::File::open(path).ok()?;
+    let mut decoder = jpeg_decoder::Decoder::new(BufReader::new(file));
+    decoder.read_info().ok()?;
+    let info = decoder.info()?;
+    Some((info.width as u32, info.height as u32))
+}
+
+/// SIMD/multi-threaded RGBA8 resize via `fast_image_resize` — several times
+/// faster than `image::imageops::resize` at equivalent (Lanczos3) quality. Used
+/// for both transient preview downscaling and preload-cache generation.
+pub fn fast_resize_rgba(src: &[u8], (sw, sh): (u32, u32), (dw, dh): (u32, u32)) -> Vec<u8> {
+    use fast_image_resize::images::{Image, ImageRef};
+    use fast_image_resize::{PixelType, ResizeOptions, Resizer};
+
+    let src_view = ImageRef::new(sw, sh, src, PixelType::U8x4).expect("rgba source size mismatch");
+    let mut dst = Image::new(dw, dh, PixelType::U8x4);
+    let mut resizer = Resizer::new();
+    // `use_alpha(false)`: resize channels independently, matching the previous
+    // `imageops::resize` behaviour. egui's `ColorImage` buffer is already
+    // premultiplied, so letting fir multiply/divide alpha again would corrupt
+    // semi-transparent pixels.
+    resizer
+        .resize(&src_view, &mut dst, &ResizeOptions::new().use_alpha(false))
+        .expect("resize failed");
+    dst.into_vec()
+}
+
 /// Decode every frame of an animated GIF into already-composited RGBA frames with
 /// their delays. The `image` crate's GIF `AnimationDecoder` handles frame
 /// disposal/compositing, so each returned frame is a full-canvas image. A
@@ -288,19 +320,21 @@ pub fn get_absolute_path(filename: &str) -> Result<PathBuf, String> {
 }
 
 pub fn downscale_color_image(image: &ColorImage, max_size: usize) -> ColorImage {
-    let size = image.size;
-    // `Color32` is `#[repr(C)] [u8; 4]`, so the pixel buffer is already RGBA bytes
-    // — reinterpret it instead of rebuilding the buffer pixel-by-pixel.
+    let (width, height) = (image.size[0] as u32, image.size[1] as u32);
+    let max = max_size as u32;
+    if width <= max && height <= max {
+        return image.clone();
+    }
+    let aspect_ratio = width as f32 / height as f32;
+    let (new_w, new_h) = if width > height {
+        (max, ((max as f32 / aspect_ratio).round() as u32).max(1))
+    } else {
+        (((max as f32 * aspect_ratio).round() as u32).max(1), max)
+    };
+    // `Color32` is `#[repr(C)] [u8; 4]`, so the pixel buffer is already RGBA bytes.
     let raw: &[u8] = bytemuck::cast_slice(&image.pixels);
-    let rgba_image = image::RgbaImage::from_raw(size[0] as u32, size[1] as u32, raw.to_vec()).unwrap();
-    let (width, height) = (rgba_image.width(), rgba_image.height());
-    let new_dims = if width > max_size as u32 || height > max_size as u32 {
-        let aspect_ratio = width as f32 / height as f32;
-        if width > height { (max_size as u32, (max_size as f32 / aspect_ratio) as u32) }
-        else { ((max_size as f32 * aspect_ratio) as u32, max_size as u32) }
-    } else { (width, height) };
-    let resized_img = imageops::resize(&rgba_image, new_dims.0, new_dims.1, imageops::FilterType::Lanczos3);
-    ColorImage::from_rgba_unmultiplied([resized_img.width() as _, resized_img.height() as _], resized_img.as_raw())
+    let resized = fast_resize_rgba(raw, (width, height), (new_w, new_h));
+    ColorImage::from_rgba_unmultiplied([new_w as _, new_h as _], &resized)
 }
 
 #[cfg(test)]

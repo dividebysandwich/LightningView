@@ -12,7 +12,8 @@ use std::{
 
 use crate::cache::{preload_cache_path, save_preload_cache};
 use crate::decode::{
-    decode_image_data, decode_preview, load_full_for_worker, to_egui_color_image, PREVIEW_MAX_DIM,
+    decode_image_data, decode_preview, jpeg_dimensions, load_full_for_worker, to_egui_color_image,
+    PREVIEW_MAX_DIM,
 };
 use crate::types::{FullResReply, FullResRequest, FullResWorker, LoadedImage, MemoryGate, PreloadState};
 
@@ -158,7 +159,14 @@ fn full_res_dispatcher_loop(
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            let fast_preview = matches!(extension.as_str(), "jpg" | "jpeg");
+            // ...and only when scaling actually saves work: for a JPEG already near
+            // (or below) the preview size, the scaled decode returns full resolution,
+            // so doing it *and* the full-res decode would decode the same file twice.
+            // A cheap header read lets us skip the preview for those.
+            let fast_preview = matches!(extension.as_str(), "jpg" | "jpeg")
+                && jpeg_dimensions(&req.path)
+                    .map(|(w, h)| w.max(h) as f32 > PREVIEW_MAX_DIM as f32 * 1.25)
+                    .unwrap_or(false);
             // Width of whatever is currently displayed; used by the UI to preserve
             // the user's zoom across the preview→full-res swap.
             let mut shown_preview_width = req.preview_width;

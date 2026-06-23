@@ -1444,6 +1444,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_image_resize"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbc7fe45cf92b43817ff62a3723e862b85bd1d06288f63007f7645d1d2f7a060"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2562,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "lightningview"
-version = "2.5.8"
+version = "2.5.9"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -2570,12 +2582,14 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "fast_image_resize",
  "image 0.25.10",
  "imagepipe",
  "jpeg-decoder",
  "jxl-oxide",
  "log",
  "ndarray",
+ "qoi",
  "rand 0.10.1",
  "rawler",
  "rayon",

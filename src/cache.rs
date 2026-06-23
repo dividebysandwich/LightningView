@@ -1,12 +1,13 @@
 // --- Preload Cache ---
-use image::{imageops, DynamicImage};
+use egui::ColorImage;
+use image::DynamicImage;
 use std::{
     env, fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::decode::to_egui_color_image;
+use crate::decode::fast_resize_rgba;
 use crate::types::LoadedImage;
 
 const PRELOAD_CACHE_WIDTH: u32 = 1920;
@@ -39,7 +40,7 @@ fn preload_cache_filename(path: &Path) -> String {
             }
         }
     }
-    format!("{:016x}.jpg", fnv1a_hash(input.as_bytes()))
+    format!("{:016x}.qoi", fnv1a_hash(input.as_bytes()))
 }
 
 pub fn preload_cache_path(path: &Path) -> PathBuf {
@@ -59,11 +60,16 @@ pub fn save_preload_cache(img: &DynamicImage, image_path: &Path) -> Result<(), S
 
     let aspect = img.height() as f32 / img.width() as f32;
     let new_h = ((PRELOAD_CACHE_WIDTH as f32 * aspect).round() as u32).max(1);
-    let resized = img.resize_exact(PRELOAD_CACHE_WIDTH, new_h, imageops::FilterType::Lanczos3);
-    let rgb = resized.to_rgb8();
-    DynamicImage::ImageRgb8(rgb)
-        .save_with_format(&cache_path, image::ImageFormat::Jpeg)
-        .map_err(|e| format!("Failed to save preload cache JPEG: {}", e))?;
+    // Fast SIMD resize, then encode as QOI: both the encode here and the decode on
+    // revisit are several times faster than the JPEG round-trip this replaced (QOI
+    // is also lossless, so cached previews are pixel-exact).
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let resized = fast_resize_rgba(rgba.as_raw(), (w, h), (PRELOAD_CACHE_WIDTH, new_h));
+    let encoded = qoi::encode_to_vec(&resized, PRELOAD_CACHE_WIDTH, new_h)
+        .map_err(|e| format!("Failed to QOI-encode preload cache: {}", e))?;
+    fs::write(&cache_path, encoded)
+        .map_err(|e| format!("Failed to write preload cache: {}", e))?;
     log::debug!("Saved preload cache: {}", cache_path.display());
     Ok(())
 }
@@ -73,13 +79,24 @@ pub fn load_preload_cache(path: &Path) -> Option<LoadedImage> {
     if !cache_path.exists() {
         return None;
     }
-    match image::open(&cache_path) {
-        Ok(img) => {
-            log::debug!("Hit preload cache for {}", path.display());
-            Some(LoadedImage::Static(to_egui_color_image(img)))
-        }
+    let bytes = match fs::read(&cache_path) {
+        Ok(b) => b,
         Err(e) => {
             log::warn!("Failed to read preload cache {}: {}", cache_path.display(), e);
+            return None;
+        }
+    };
+    match qoi::decode_to_vec(&bytes) {
+        Ok((header, pixels)) => {
+            log::debug!("Hit preload cache for {}", path.display());
+            let image = ColorImage::from_rgba_unmultiplied(
+                [header.width as _, header.height as _],
+                &pixels,
+            );
+            Some(LoadedImage::Static(image))
+        }
+        Err(e) => {
+            log::warn!("Failed to decode preload cache {}: {}", cache_path.display(), e);
             let _ = fs::remove_file(&cache_path);
             None
         }
@@ -103,5 +120,39 @@ pub fn clear_old_preload_cache() {
     }
     if removed > 0 {
         log::info!("Cleared {} stale preload cache entries", removed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::UNIX_EPOCH;
+
+    /// Save a >1920px image to the QOI preload cache and read it back, confirming
+    /// the resize + encode + decode round-trip yields a downscaled preview.
+    #[test]
+    fn preload_cache_qoi_roundtrip() {
+        // A real on-disk source file is needed because the cache key hashes the
+        // path's metadata (size + mtime).
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let src_path = env::temp_dir().join(format!("lv_cache_src_{}.png", nanos));
+        let src = DynamicImage::ImageRgb8(image::RgbImage::new(2400, 1600));
+        src.save(&src_path).unwrap();
+
+        save_preload_cache(&src, &src_path).expect("cache save should succeed");
+        let cache_path = preload_cache_path(&src_path);
+        assert!(cache_path.exists(), "cache file should be written");
+
+        let loaded = load_preload_cache(&src_path);
+        let _ = fs::remove_file(&src_path);
+        let _ = fs::remove_file(&cache_path);
+
+        match loaded {
+            Some(LoadedImage::Static(img)) => {
+                assert_eq!(img.width(), PRELOAD_CACHE_WIDTH as usize);
+                assert_eq!(img.height(), (PRELOAD_CACHE_WIDTH as f32 * (1600.0 / 2400.0)).round() as usize);
+            }
+            other => panic!("expected a static cached image, got {:?}", other.is_some()),
+        }
     }
 }
