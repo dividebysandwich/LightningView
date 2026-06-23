@@ -2,6 +2,7 @@
 use egui::ColorImage;
 use image::{codecs::gif::GifDecoder, imageops, AnimationDecoder, DynamicImage, ImageReader, Luma};
 use jxl_oxide::integration::JxlDecoder;
+use libjpeg_turbo_rs as ljt;
 use ndarray::{s, Array, Array2, IxDyn};
 use rayon::prelude::*;
 use rustronomy_fits as rsf;
@@ -39,6 +40,8 @@ pub fn decode_image_data(path: &Path) -> Result<DynamicImage, String> {
         load_fits(&path_str)
     } else if JXL_SUPPORTED_FORMATS.contains(&extension.as_str()) {
         load_jxl(&path_str)
+    } else if matches!(extension.as_str(), "jpg" | "jpeg") {
+        load_jpeg_full(&path_str)
     } else {
         load_with_image_crate(&path_str)
     }
@@ -85,24 +88,56 @@ pub fn decode_preview(path: &Path, max_dim: u32) -> Result<DynamicImage, String>
     }
 }
 
-/// DCT-scaled JPEG decode via `jpeg-decoder`. Returns `None` for colour models we
-/// don't convert here (CMYK, 16-bit grey) so the caller can fall back to the full
-/// `image`-crate decode, which handles them.
-fn load_jpeg_scaled(path: &Path, max_dim: u32) -> Option<DynamicImage> {
-    use jpeg_decoder::{Decoder, PixelFormat};
-    let file = fs::File::open(path).ok()?;
-    let mut decoder = Decoder::new(BufReader::new(file));
-    // Decode at the largest built-in scale (1/8..1/1) that still fits within max_dim.
-    let cap = max_dim.min(u16::MAX as u32) as u16;
-    decoder.scale(cap, cap).ok()?;
-    let pixels = decoder.decode().ok()?;
-    let info = decoder.info()?;
-    let (w, h) = (info.width as u32, info.height as u32);
-    match info.pixel_format {
-        PixelFormat::RGB24 => image::RgbImage::from_raw(w, h, pixels).map(DynamicImage::ImageRgb8),
-        PixelFormat::L8 => image::GrayImage::from_raw(w, h, pixels).map(DynamicImage::ImageLuma8),
-        _ => None,
+/// Decode JPEG bytes with libjpeg-turbo-rs (pure-Rust libjpeg-turbo with SIMD).
+/// `scale` selects a DCT scaling factor for cheap downscaled decoding; `None`
+/// decodes at full resolution. Output is always RGBA8 (the decoder converts
+/// grayscale/CMYK/etc. for us). Returns `None` on any failure so the caller can
+/// fall back to the format-sniffing `image`-crate path (mislabelled files, etc.).
+fn decode_jpeg_turbo(data: &[u8], scale: Option<ljt::ScalingFactor>) -> Option<DynamicImage> {
+    let mut decoder = ljt::Decoder::new(data).ok()?;
+    if let Some(s) = scale {
+        decoder.set_scale(s);
     }
+    decoder.set_output_format(ljt::PixelFormat::Rgba);
+    let img = decoder.decode_image().ok()?;
+    image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.data).map(DynamicImage::ImageRgba8)
+}
+
+/// Full-resolution JPEG decode. Tries the fast SIMD libjpeg-turbo path first and
+/// falls back to the `image` crate (with content sniffing) for files that aren't
+/// actually decodable JPEGs despite a .jpg/.jpeg extension.
+fn load_jpeg_full(path: &str) -> Result<DynamicImage, String> {
+    let data = fs::read(path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    if let Some(img) = decode_jpeg_turbo(&data, None) {
+        return Ok(img);
+    }
+    log::debug!("libjpeg-turbo declined {}; falling back to image crate", path);
+    load_with_image_crate(path)
+}
+
+/// DCT-scaled JPEG decode for fast previews. Reads the header to size the scale
+/// factor, then decodes at the smallest libjpeg M/8 factor whose output still
+/// covers `max_dim` (crisp preview, a fraction of the full-decode work).
+fn load_jpeg_scaled(path: &Path, max_dim: u32) -> Option<DynamicImage> {
+    let data = fs::read(path).ok()?;
+    let (fw, fh) = jpeg_dimensions_reader(std::io::Cursor::new(&data))?;
+    let scale = pick_jpeg_scale(fw.max(fh), max_dim);
+    decode_jpeg_turbo(&data, Some(scale))
+}
+
+/// Pick a libjpeg `M/8` scaling factor (M in 1..=8): the smallest output that
+/// still covers `target` in the largest dimension, or 1/1 if the image is already
+/// at or below the target.
+fn pick_jpeg_scale(full_max_dim: u32, target: u32) -> ljt::ScalingFactor {
+    if full_max_dim <= target {
+        return ljt::ScalingFactor::new(8, 8);
+    }
+    for num in 1..=8u32 {
+        if full_max_dim * num / 8 >= target {
+            return ljt::ScalingFactor::new(num, 8);
+        }
+    }
+    ljt::ScalingFactor::new(8, 8)
 }
 
 /// Read just the JPEG header (markers up to start-of-scan) to get the pixel
@@ -111,7 +146,11 @@ fn load_jpeg_scaled(path: &Path, max_dim: u32) -> Option<DynamicImage> {
 /// preview size, scaling buys nothing and would just decode the file twice.
 pub fn jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
     let file = fs::File::open(path).ok()?;
-    let mut decoder = jpeg_decoder::Decoder::new(BufReader::new(file));
+    jpeg_dimensions_reader(BufReader::new(file))
+}
+
+fn jpeg_dimensions_reader<R: std::io::BufRead>(reader: R) -> Option<(u32, u32)> {
+    let mut decoder = jpeg_decoder::Decoder::new(reader);
     decoder.read_info().ok()?;
     let info = decoder.info()?;
     Some((info.width as u32, info.height as u32))
@@ -361,5 +400,98 @@ mod tests {
         let _ = fs::remove_file(&path);
         let decoded = decoded.expect("mislabelled PNG-in-.jpg should still decode");
         assert_eq!((decoded.width(), decoded.height()), (8, 6));
+    }
+
+    /// Encode a JPEG in memory and decode it back through libjpeg-turbo, at full
+    /// resolution and at a 1/2 DCT scale, confirming dimensions and that the colour
+    /// survives the round-trip.
+    #[test]
+    fn turbo_decodes_full_and_scaled() {
+        let mut src = image::RgbImage::new(800, 600);
+        for p in src.pixels_mut() {
+            *p = image::Rgb([200, 100, 50]);
+        }
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgb8(src)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+            .unwrap();
+
+        // Full decode.
+        let full = decode_jpeg_turbo(&bytes, None).expect("turbo full decode");
+        assert_eq!((full.width(), full.height()), (800, 600));
+        let rgba = full.to_rgba8();
+        let px = rgba.get_pixel(400, 300).0;
+        assert!((px[0] as i32 - 200).abs() < 12 && (px[1] as i32 - 100).abs() < 12, "colour off: {:?}", px);
+
+        // Scaled decode at 1/2.
+        let half = decode_jpeg_turbo(&bytes, Some(ljt::ScalingFactor::new(1, 2))).expect("turbo scaled decode");
+        assert_eq!((half.width(), half.height()), (400, 300));
+    }
+
+    /// Rough decode-speed comparison on a large, hard-to-compress JPEG. Ignored by
+    /// default (slow, needs --release for SIMD). Run with:
+    ///   cargo test --release bench_jpeg_decode -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_jpeg_decode() {
+        use std::time::Instant;
+        // 24MP with a noisy pattern so the decoder actually does work.
+        let (w, h) = (6000u32, 4000u32);
+        let mut src = image::RgbImage::new(w, h);
+        // Smooth, photographic-like content (gradients + low-frequency waves) so the
+        // encoded size and decode cost resemble a real photo rather than pure noise.
+        for (x, y, p) in src.enumerate_pixels_mut() {
+            let fx = x as f32 / w as f32;
+            let fy = y as f32 / h as f32;
+            let r = (128.0 + 110.0 * (fx * 6.28).sin()) as u8;
+            let g = (128.0 + 110.0 * (fy * 9.42).sin()) as u8;
+            let b = (255.0 * (fx + fy) * 0.5) as u8;
+            *p = image::Rgb([r, g, b]);
+        }
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgb8(src)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+            .unwrap();
+        println!("\nJPEG size: {} KB ({}x{})", bytes.len() / 1024, w, h);
+
+        let runs = 5;
+        let bench = |label: &str, f: &dyn Fn()| {
+            f(); // warm up
+            let t = Instant::now();
+            for _ in 0..runs {
+                f();
+            }
+            println!("  {:<28} {:>7.1} ms/decode", label, t.elapsed().as_secs_f64() * 1000.0 / runs as f64);
+        };
+
+        bench("zune full -> RGB", &|| {
+            image::load_from_memory(&bytes).unwrap();
+        });
+        bench("zune full -> RGBA", &|| {
+            image::load_from_memory(&bytes).unwrap().into_rgba8();
+        });
+        bench("turbo full -> RGBA", &|| {
+            decode_jpeg_turbo(&bytes, None).unwrap();
+        });
+        bench("turbo 1/4 scaled -> RGBA", &|| {
+            decode_jpeg_turbo(&bytes, Some(ljt::ScalingFactor::new(2, 8))).unwrap();
+        });
+        bench("jpeg-decoder 1/4 scaled", &|| {
+            let mut d = jpeg_decoder::Decoder::new(std::io::Cursor::new(&bytes));
+            d.scale(1500, 1500).unwrap();
+            d.decode().unwrap();
+        });
+    }
+
+    /// `pick_jpeg_scale` should choose the smallest M/8 output that still covers the
+    /// target, and 1/1 when the image is already small enough.
+    #[test]
+    fn jpeg_scale_selection() {
+        // 6000px → smallest M with 6000*M/8 >= 2048 is M=3 (2250).
+        let s = pick_jpeg_scale(6000, 2048);
+        assert_eq!((s.num, s.denom), (3, 8));
+        // Already below target → no scaling.
+        let s = pick_jpeg_scale(1600, 2048);
+        assert_eq!((s.num, s.denom), (8, 8));
     }
 }

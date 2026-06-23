@@ -2545,6 +2545,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libjpeg-turbo-rs"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ba8f0363f4f6f520a33e98dbc2b3ed4281d3186b8a698cfa54453c5cd20bb26"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2574,7 +2583,7 @@ dependencies = [
 
 [[package]]
 name = "lightningview"
-version = "2.5.9"
+version = "2.5.10"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -2587,6 +2596,7 @@ dependencies = [
  "imagepipe",
  "jpeg-decoder",
  "jxl-oxide",
+ "libjpeg-turbo-rs",
  "log",
  "ndarray",
  "qoi",
