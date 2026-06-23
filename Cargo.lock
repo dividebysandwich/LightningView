@@ -2562,15 +2562,17 @@ dependencies = [
 
 [[package]]
 name = "lightningview"
-version = "2.5.6"
+version = "2.5.7"
 dependencies = [
  "arboard",
+ "bytemuck",
  "const_format",
  "eframe",
  "egui",
  "env_logger",
  "image 0.25.10",
  "imagepipe",
+ "jpeg-decoder",
  "jxl-oxide",
  "log",
  "ndarray",

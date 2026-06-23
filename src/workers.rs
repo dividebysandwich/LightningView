@@ -11,8 +11,10 @@ use std::{
 };
 
 use crate::cache::{preload_cache_path, save_preload_cache};
-use crate::decode::{decode_image_data, load_image};
-use crate::types::{FullResReply, FullResRequest, FullResWorker, MemoryGate, PreloadState};
+use crate::decode::{
+    decode_image_data, decode_preview, load_full_for_worker, to_egui_color_image, PREVIEW_MAX_DIM,
+};
+use crate::types::{FullResReply, FullResRequest, FullResWorker, LoadedImage, MemoryGate, PreloadState};
 
 /// Spawn N worker threads that share a queue of paths to preload.
 /// Workers catch panics so a single bad file doesn't stall the rest of the queue,
@@ -144,22 +146,75 @@ fn full_res_dispatcher_loop(
         let generation2 = generation.clone();
         let gate2 = gate.clone();
         thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_image(&req.path)))
+            // Phase 1: when nothing is on screen yet (no cache / embedded thumbnail),
+            // emit a fast scaled preview so the user sees a crisp image almost
+            // immediately. Only worth it for formats with a genuinely cheaper
+            // reduced-resolution decode (JPEG's DCT scaling) — for others a
+            // "preview" would just be a full decode we'd then repeat, so we skip
+            // straight to the full-res decode below.
+            let extension = req
+                .path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let fast_preview = matches!(extension.as_str(), "jpg" | "jpeg");
+            // Width of whatever is currently displayed; used by the UI to preserve
+            // the user's zoom across the preview→full-res swap.
+            let mut shown_preview_width = req.preview_width;
+            if req.preview_width == 0 && fast_preview {
+                let preview = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decode_preview(&req.path, PREVIEW_MAX_DIM)
+                }))
+                .ok()
+                .and_then(|r| r.ok());
+                if let Some(img) = preview {
+                    if generation2.load(Ordering::Relaxed) == my_gen {
+                        shown_preview_width = img.width();
+                        let reply = FullResReply {
+                            path: req.path.clone(),
+                            preview_width: 0,
+                            is_preview: true,
+                            result: Ok(LoadedImage::Static(to_egui_color_image(img))),
+                        };
+                        if reply_tx.send(reply).is_ok() {
+                            ctx2.request_repaint();
+                        }
+                    }
+                }
+            }
+
+            // Phase 2: full-resolution decode.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_full_for_worker(&req.path)))
                 .unwrap_or_else(|_| Err(format!("decoder panicked for {}", req.path.display())));
             gate2.release();
             // If a newer request has been accepted while we were decoding, this
-            // result is no longer wanted — silently drop it.
+            // result is no longer wanted. The full-res pixels are already decoded
+            // though, so still persist the preload cache for a fast revisit.
             if generation2.load(Ordering::Relaxed) != my_gen {
                 log::debug!("Discarding stale decode result for {}", req.path.display());
+                if let Ok((_, Some(dyn_img))) = &outcome {
+                    let _ = save_preload_cache(dyn_img, &req.path);
+                }
                 return;
             }
+            let (result, dyn_for_cache) = match outcome {
+                Ok((loaded, dyn_img)) => (Ok(loaded), dyn_img),
+                Err(e) => (Err(e), None),
+            };
             let reply = FullResReply {
-                path: req.path,
-                preview_width: req.preview_width,
+                path: req.path.clone(),
+                preview_width: shown_preview_width,
+                is_preview: false,
                 result,
             };
             if reply_tx.send(reply).is_ok() {
                 ctx2.request_repaint();
+            }
+            // Cache generation (resize + JPEG encode + disk write) now runs *after*
+            // the UI already has its image, so it never delays first paint.
+            if let Some(dyn_img) = dyn_for_cache {
+                let _ = save_preload_cache(&dyn_img, &req.path);
             }
         });
     }

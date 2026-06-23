@@ -14,9 +14,13 @@ use std::{
     time::Duration,
 };
 
-use crate::cache::save_preload_cache;
 use crate::formats::*;
 use crate::types::{AnimationFrame, LoadedImage};
+
+/// Target maximum dimension (in pixels) for the fast preview decode. Matches the
+/// `max_texture_side` used when building the preview texture, so the preview we
+/// decode is already close to what gets uploaded to the GPU.
+pub const PREVIEW_MAX_DIM: u32 = 2048;
 
 pub fn decode_image_data(path: &Path) -> Result<DynamicImage, String> {
     let path_str = path.to_string_lossy();
@@ -40,14 +44,65 @@ pub fn decode_image_data(path: &Path) -> Result<DynamicImage, String> {
     }
 }
 
-pub fn load_image(path: &Path) -> Result<LoadedImage, String> {
+/// Full-resolution decode for the foreground worker. Returns the displayable
+/// image and, for static images, the decoded `DynamicImage` so the caller can
+/// generate the preload cache *after* handing the display image to the UI —
+/// keeping the (Lanczos resize + JPEG encode + disk write) off the first-paint
+/// path. Animated images return `None` (we never cache them).
+pub fn load_full_for_worker(path: &Path) -> Result<(LoadedImage, Option<DynamicImage>), String> {
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     if ANIM_SUPPORTED_FORMATS.contains(&extension.as_str()) {
-        return load_animated_gif(&path.to_string_lossy());
+        return Ok((load_animated_gif(&path.to_string_lossy())?, None));
     }
     let dynamic_image = decode_image_data(path)?;
-    let _ = save_preload_cache(&dynamic_image, path);
-    Ok(LoadedImage::Static(to_egui_color_image(dynamic_image)))
+    // Build the display image from a borrow so we keep `dynamic_image` for the
+    // cache step. For RGB JPEGs (the common case) this costs nothing extra over
+    // `into_rgba8`, which would also allocate a fresh RGBA buffer.
+    let color = color_image_from_dynamic(&dynamic_image);
+    Ok((LoadedImage::Static(color), Some(dynamic_image)))
+}
+
+/// Decode a reduced-resolution preview as cheaply as possible so the user sees a
+/// crisp image almost immediately while the full-resolution decode runs behind
+/// it. For JPEGs this is a true DCT-scaled decode (roughly an order of magnitude
+/// less work than decoding 24MP in full); other formats have no pure-Rust
+/// decode-time shortcut, so they decode normally and are downscaled.
+pub fn decode_preview(path: &Path, max_dim: u32) -> Result<DynamicImage, String> {
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if matches!(extension.as_str(), "jpg" | "jpeg") {
+        if let Some(img) = load_jpeg_scaled(path, max_dim) {
+            return Ok(img);
+        }
+        // Unsupported subsampling/colour model (e.g. CMYK) — fall through.
+    }
+    let full = decode_image_data(path)?;
+    if full.width() > max_dim || full.height() > max_dim {
+        // Triangle (bilinear) is plenty for a transient preview and much faster
+        // than the Lanczos3 used for the persisted cache.
+        Ok(full.resize(max_dim, max_dim, imageops::FilterType::Triangle))
+    } else {
+        Ok(full)
+    }
+}
+
+/// DCT-scaled JPEG decode via `jpeg-decoder`. Returns `None` for colour models we
+/// don't convert here (CMYK, 16-bit grey) so the caller can fall back to the full
+/// `image`-crate decode, which handles them.
+fn load_jpeg_scaled(path: &Path, max_dim: u32) -> Option<DynamicImage> {
+    use jpeg_decoder::{Decoder, PixelFormat};
+    let file = fs::File::open(path).ok()?;
+    let mut decoder = Decoder::new(BufReader::new(file));
+    // Decode at the largest built-in scale (1/8..1/1) that still fits within max_dim.
+    let cap = max_dim.min(u16::MAX as u32) as u16;
+    decoder.scale(cap, cap).ok()?;
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    match info.pixel_format {
+        PixelFormat::RGB24 => image::RgbImage::from_raw(w, h, pixels).map(DynamicImage::ImageRgb8),
+        PixelFormat::L8 => image::GrayImage::from_raw(w, h, pixels).map(DynamicImage::ImageLuma8),
+        _ => None,
+    }
 }
 
 /// Decode every frame of an animated GIF into already-composited RGBA frames with
@@ -104,6 +159,14 @@ fn load_gif_first_frame(path: &str) -> Result<DynamicImage, String> {
 
 pub fn to_egui_color_image(img: DynamicImage) -> ColorImage {
     let rgba = img.into_rgba8();
+    let dims = rgba.dimensions();
+    ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], rgba.as_raw())
+}
+
+/// Like `to_egui_color_image` but borrows the source so the caller can keep the
+/// `DynamicImage` afterwards (e.g. to generate the preload cache).
+pub fn color_image_from_dynamic(img: &DynamicImage) -> ColorImage {
+    let rgba = img.to_rgba8();
     let dims = rgba.dimensions();
     ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], rgba.as_raw())
 }
@@ -218,9 +281,12 @@ pub fn get_absolute_path(filename: &str) -> Result<PathBuf, String> {
     }
 }
 
-pub fn downscale_color_image(image: ColorImage, max_size: usize) -> ColorImage {
+pub fn downscale_color_image(image: &ColorImage, max_size: usize) -> ColorImage {
     let size = image.size;
-    let rgba_image = image::RgbaImage::from_raw(size[0] as u32, size[1] as u32, image.pixels.iter().flat_map(|c| c.to_array()).collect()).unwrap();
+    // `Color32` is `#[repr(C)] [u8; 4]`, so the pixel buffer is already RGBA bytes
+    // — reinterpret it instead of rebuilding the buffer pixel-by-pixel.
+    let raw: &[u8] = bytemuck::cast_slice(&image.pixels);
+    let rgba_image = image::RgbaImage::from_raw(size[0] as u32, size[1] as u32, raw.to_vec()).unwrap();
     let (width, height) = (rgba_image.width(), rgba_image.height());
     let new_dims = if width > max_size as u32 || height > max_size as u32 {
         let aspect_ratio = width as f32 / height as f32;

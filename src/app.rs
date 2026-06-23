@@ -120,7 +120,9 @@ impl ImageViewerApp {
         let needs_tiling = image.width() > max_texture_side || image.height() > max_texture_side;
 
         let preview_image = if needs_tiling {
-            downscale_color_image(image.clone(), max_texture_side)
+            // Downscale reads the buffer by reference now, so we no longer clone
+            // the full-resolution image (~96MB for a 24MP photo) just to feed it.
+            downscale_color_image(&image, max_texture_side)
         } else {
             image.clone()
         };
@@ -247,10 +249,14 @@ impl ImageViewerApp {
                 continue;
             }
 
-            self.full_res_pending = false;
-            self.full_res_pending_since = None;
-            if let Some(state) = &self.preload_state {
-                state.pause.store(false, Ordering::Relaxed);
+            // A preview reply is just a fast first paint — keep waiting for the
+            // sharp full-res decode that follows it, and leave bulk preload paused.
+            if !reply.is_preview {
+                self.full_res_pending = false;
+                self.full_res_pending_since = None;
+                if let Some(state) = &self.preload_state {
+                    state.pause.store(false, Ordering::Relaxed);
+                }
             }
             match reply.result {
                 Ok(loaded) => {
@@ -270,7 +276,11 @@ impl ImageViewerApp {
                         LoadedImage::Static(full_res) => self.display_loaded_image(full_res, &reply.path, ctx),
                         LoadedImage::Animated(frames) => self.display_animated_image(frames, &reply.path, ctx),
                     }
-                    log::info!("Swapped in full-res image: {}", reply.path.display());
+                    if reply.is_preview {
+                        log::info!("Showed fast preview for: {}", reply.path.display());
+                    } else {
+                        log::info!("Swapped in full-res image: {}", reply.path.display());
+                    }
                     ctx.request_repaint();
                 }
                 Err(e) => {

@@ -34,6 +34,10 @@ pub struct FullResRequest {
 pub struct FullResReply {
     pub path: PathBuf,
     pub preview_width: u32,
+    /// True for the fast scaled-preview reply that precedes the full-resolution
+    /// decode. The UI displays it but keeps `full_res_pending` set so the sharp
+    /// full-res image still swaps in behind it.
+    pub is_preview: bool,
     pub result: Result<LoadedImage, String>,
 }
 
