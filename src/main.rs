@@ -60,6 +60,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             unregister_urlhandler();
             println!("Unregistered as image viewer.");
             return Ok(());
+        } else if image_file_arg.eq_ignore_ascii_case("/cleanup") {
+            // Invoked by the installer (and available manually) to remove stale /
+            // duplicate per-user registrations left by older versions.
+            cleanup_registrations();
+            println!("Cleaned up legacy/duplicate registrations.");
+            return Ok(());
         }
     }
 

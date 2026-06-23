@@ -127,131 +127,60 @@
                         Source='$(var.CargoTargetBinDir)\lightningview.exe'
                         KeyPath='yes'/>
                     
+                    <!--
+                      ONE shared "open" verb for the whole ProgId. Previously every
+                      supported extension declared its own <Verb>, but since they all
+                      hang off the single LightningView.Image.1 ProgId they all landed
+                      under HKCR\LightningView.Image.1\shell\* and Windows rendered them
+                      as dozens of identical "Open with LightningView" context-menu
+                      entries. The verb is defined once (under the first extension) and
+                      every other extension simply associates with the same ProgId, so
+                      they share this single verb / single menu entry.
+                    -->
                     <ProgId Id='LightningView.Image.1' Description='LightningView Image File' Icon='exe0'>
-                        
                         <Extension Id='png'>
-                            <Verb Id='open_png' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
+                            <Verb Id='open' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
                         </Extension>
-                        <Extension Id='jpg'>
-                            <Verb Id='open_jpg' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='jpeg'>
-                            <Verb Id='open_jpeg' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='bmp'>
-                            <Verb Id='open_bmp' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='gif'>
-                            <Verb Id='open_gif' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='ico'>
-                            <Verb Id='open_ico' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='jxl'>
-                            <Verb Id='open_jxl' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='pnm'>
-                            <Verb Id='open_pnm' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='svg'>
-                            <Verb Id='open_svg' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='tiff'>
-                            <Verb Id='open_tiff' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='tif'>
-                            <Verb Id='open_tif' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='tga'>
-                            <Verb Id='open_tga' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='webp'>
-                            <Verb Id='open_webp' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='xbm'>
-                            <Verb Id='open_xbm' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='xpm'>
-                            <Verb Id='open_xpm' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='mrw'>
-                            <Verb Id='open_mrw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='arw'>
-                            <Verb Id='open_arw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='srf'>
-                            <Verb Id='open_srf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='sr2'>
-                            <Verb Id='open_sr2' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='mef'>
-                            <Verb Id='open_mef' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='orf'>
-                            <Verb Id='open_orf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='srw'>
-                            <Verb Id='open_srw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='erf'>
-                            <Verb Id='open_erf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='kdc'>
-                            <Verb Id='open_kdc' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='dcs'>
-                            <Verb Id='open_dcs' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='rw2'>
-                            <Verb Id='open_rw2' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='raf'>
-                            <Verb Id='open_raf' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='dcr'>
-                            <Verb Id='open_dcr' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='dng'>
-                            <Verb Id='open_dng' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='pef'>
-                            <Verb Id='open_pef' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='crw'>
-                            <Verb Id='open_crw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='iiq'>
-                            <Verb Id='open_iiq' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='3fr'>
-                            <Verb Id='open_3fr' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='nrw'>
-                            <Verb Id='open_nrw' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='nef'>
-                            <Verb Id='open_nef' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='mos'>
-                            <Verb Id='open_mos' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='cr2'>
-                            <Verb Id='open_cr2' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='ari'>
-                            <Verb Id='open_ari' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='ori'>
-                            <Verb Id='open_ori' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='fit'>
-                            <Verb Id='open_fit' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
-                        <Extension Id='fits'>
-                            <Verb Id='open_fits' Command='Open with LightningView' TargetFile='exe0' Argument='&quot;%1&quot;' />
-                        </Extension>
+                        <Extension Id='jpg' />
+                        <Extension Id='jpeg' />
+                        <Extension Id='bmp' />
+                        <Extension Id='gif' />
+                        <Extension Id='ico' />
+                        <Extension Id='jxl' />
+                        <Extension Id='pnm' />
+                        <Extension Id='svg' />
+                        <Extension Id='tiff' />
+                        <Extension Id='tif' />
+                        <Extension Id='tga' />
+                        <Extension Id='webp' />
+                        <Extension Id='xbm' />
+                        <Extension Id='xpm' />
+                        <Extension Id='mrw' />
+                        <Extension Id='arw' />
+                        <Extension Id='srf' />
+                        <Extension Id='sr2' />
+                        <Extension Id='mef' />
+                        <Extension Id='orf' />
+                        <Extension Id='srw' />
+                        <Extension Id='erf' />
+                        <Extension Id='kdc' />
+                        <Extension Id='dcs' />
+                        <Extension Id='rw2' />
+                        <Extension Id='raf' />
+                        <Extension Id='dcr' />
+                        <Extension Id='dng' />
+                        <Extension Id='pef' />
+                        <Extension Id='crw' />
+                        <Extension Id='iiq' />
+                        <Extension Id='3fr' />
+                        <Extension Id='nrw' />
+                        <Extension Id='nef' />
+                        <Extension Id='mos' />
+                        <Extension Id='cr2' />
+                        <Extension Id='ari' />
+                        <Extension Id='ori' />
+                        <Extension Id='fit' />
+                        <Extension Id='fits' />
                     </ProgId>
                     <RegistryKey Root='HKLM' Key='SOFTWARE\LightningView\Capabilities'>
                         <RegistryValue Name='ApplicationName' Value='LightningView' Type='string' />
@@ -341,6 +270,21 @@
         </Feature>
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <!--
+          Best-effort cleanup of stale per-user (HKCU) registrations left behind by
+          older versions or by a prior manual "lightningview.exe /register" — these
+          are what produced duplicate "lightningview" entries in the "Open with" /
+          program list alongside this installer's machine-wide registration. Runs the
+          freshly-installed exe with /cleanup. Impersonate='yes' so it touches the
+          installing user's HKCU; Return='ignore' so it can never fail the install.
+          (The installer's own HKLM registration is untouched by /cleanup.)
+        -->
+        <CustomAction Id='CleanupLegacyRegistrations' FileKey='exe0' ExeCommand='/cleanup'
+                      Execute='deferred' Impersonate='yes' Return='ignore'/>
+        <InstallExecuteSequence>
+            <Custom Action='CleanupLegacyRegistrations' After='InstallFiles'>NOT Installed OR REINSTALL</Custom>
+        </InstallExecuteSequence>
 
         
         <!--

@@ -9,17 +9,24 @@ use winreg::{enums::*, RegKey};
 
 use crate::formats::{IMAGE_RS_SUPPORTED_FORMATS, FITS_SUPPORTED_FORMATS, IMAGEREADER_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS};
 const CANONICAL_NAME: &str = "lightningview.exe";
-const PROGID: &str = "LightningViewImageFile";
+// Must match the ProgId the WiX installer registers (wix/main.wxs). Using the same
+// ProgId for the manual `/register` path and the installer prevents two different
+// handlers — and therefore two "Open with" entries — for the same app.
+const PROGID: &str = "LightningView.Image.1";
+// Pre-2.5.10 Rust-only ProgId. Older versions registered under this name, which then
+// showed up as a *second* "lightningview" entry next to LightningView.Image.1. We
+// delete it during register/cleanup so the duplicate disappears.
+const LEGACY_PROGID: &str = "LightningViewImageFile";
 
 // Configuration for "Default Programs". StartMenuInternet is the key for browsers
 // and they're expected to use the name of the exe as the key.
 const DPROG_PATH: &str = concatcp!(r"SOFTWARE\Clients\StartMenuInternet\", CANONICAL_NAME);
-const DPROG_INSTALLINFO_PATH: &str = concatcp!(DPROG_PATH, "InstallInfo");
+const DPROG_INSTALLINFO_PATH: &str = concatcp!(DPROG_PATH, r"\InstallInfo");
 
 const APPREG_BASE: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\";
 const PROGID_PATH: &str = concatcp!(r"SOFTWARE\Classes\", PROGID);
-const REGISTERED_APPLICATIONS_PATH: &str =
-    concatcp!(r"SOFTWARE\RegisteredApplications\", DISPLAY_NAME);
+const LEGACY_PROGID_PATH: &str = concatcp!(r"SOFTWARE\Classes\", LEGACY_PROGID);
+const REGISTERED_APPLICATIONS_KEY: &str = r"SOFTWARE\RegisteredApplications";
 
 const DISPLAY_NAME: &str = "Lightning View Image Viewer";
 const DESCRIPTION: &str = "Simple No-Fuss image viewer and browser";
@@ -62,6 +69,10 @@ pub fn register_urlhandler() -> io::Result<()> {
     let open_command = format!("\"{}\" \"%1\"", exe_path);
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+    // Drop the legacy duplicate ProgId before (re)writing our registration, so an
+    // upgrade from an older version doesn't leave a second handler behind.
+    let _ = hkcu.delete_subkey_all(LEGACY_PROGID_PATH);
 
     // Configure our ProgID to point to the right command
     {
@@ -158,21 +169,43 @@ fn refresh_shell() {
 
 /// Remove all the registry keys that we've set up
 pub fn unregister_urlhandler() {
-    use std::env::current_exe;
+    cleanup_registrations();
+}
 
-    // Find the current executable's name, so we can unregister it
-    let exe_name = current_exe()
-        .unwrap()
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_owned();
+/// Resolve the current executable's file name (e.g. "lightningview.exe").
+fn current_exe_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| CANONICAL_NAME.to_string())
+}
 
+/// Remove every per-user (HKCU) registry entry this app — current or older
+/// versions — may have created, including the legacy duplicate ProgId. A
+/// machine-wide installer (HKLM) registration is left intact, so running this after
+/// an MSI install leaves exactly one clean set of "Open with" / Default Programs
+/// entries. Safe to call repeatedly and when nothing is registered.
+pub fn cleanup_registrations() {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let exe_name = current_exe_name();
+
+    // Current HKCU registration written by register_urlhandler().
     let _ = hkcu.delete_subkey_all(DPROG_PATH);
     let _ = hkcu.delete_subkey_all(PROGID_PATH);
-    let _ = hkcu.delete_subkey(REGISTERED_APPLICATIONS_PATH);
     let _ = hkcu.delete_subkey_all(format!("{}{}", APPREG_BASE, exe_name));
+
+    // Legacy Rust-only ProgId from versions before the ProgId was unified with the
+    // installer — the source of the duplicate "lightningview" entry.
+    let _ = hkcu.delete_subkey_all(LEGACY_PROGID_PATH);
+
+    // RegisteredApplications entries are *values* under the key, not subkeys, so they
+    // must be removed with delete_value (the previous delete_subkey was a no-op).
+    if let Ok(registered_applications) =
+        hkcu.open_subkey_with_flags(REGISTERED_APPLICATIONS_KEY, KEY_SET_VALUE)
+    {
+        let _ = registered_applications.delete_value(DISPLAY_NAME);
+    }
+
     refresh_shell();
 }
 
