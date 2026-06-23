@@ -173,8 +173,14 @@ pub fn color_image_from_dynamic(img: &DynamicImage) -> ColorImage {
 
 fn load_with_image_crate(path: &str) -> Result<DynamicImage, String> {
     log::debug!("Loading with image-rs: {}", path);
+    // Determine the format from the file's actual magic bytes rather than trusting
+    // the extension. Some files carry a .jpg name but are really WebP/PNG/etc.;
+    // without this, `decode()` would feed them to the JPEG decoder and fail with
+    // e.g. "Illegal start bytes: 5249" (the "RI" of a RIFF/WebP container).
     ImageReader::open(path)
         .map_err(|e| format!("Failed to open {}: {}", path, e))?
+        .with_guessed_format()
+        .map_err(|e| format!("Failed to read {}: {}", path, e))?
         .decode()
         .map_err(|e| format!("Failed to decode {}: {}", path, e))
 }
@@ -295,4 +301,31 @@ pub fn downscale_color_image(image: &ColorImage, max_size: usize) -> ColorImage 
     } else { (width, height) };
     let resized_img = imageops::resize(&rgba_image, new_dims.0, new_dims.1, imageops::FilterType::Lanczos3);
     ColorImage::from_rgba_unmultiplied([resized_img.width() as _, resized_img.height() as _], resized_img.as_raw())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A file whose extension lies about its real format (here: PNG bytes in a
+    /// `.jpg`) must still decode by sniffing the magic bytes, rather than failing
+    /// with "Illegal start bytes". Regression test for mislabelled images such as
+    /// WebP-in-.jpg files exported by some phone cameras.
+    #[test]
+    fn decodes_when_extension_mismatches_content() {
+        let mut img = image::RgbImage::new(8, 6);
+        img.put_pixel(0, 0, image::Rgb([10, 20, 30]));
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = env::temp_dir().join(format!("lv_mismatch_{}.jpg", nanos));
+        // Write PNG-encoded bytes to a path ending in `.jpg`.
+        DynamicImage::ImageRgb8(img)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+
+        let decoded = decode_image_data(&path);
+        let _ = fs::remove_file(&path);
+        let decoded = decoded.expect("mislabelled PNG-in-.jpg should still decode");
+        assert_eq!((decoded.width(), decoded.height()), (8, 6));
+    }
 }
