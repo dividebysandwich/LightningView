@@ -122,6 +122,16 @@ impl VideoState {
         self.texture.as_ref()
     }
 
+    /// Current playback position in seconds (the master clock).
+    pub fn position_secs(&self) -> f64 {
+        self.clock_secs()
+    }
+
+    /// Total duration in seconds, if the container reported one.
+    pub fn duration_secs(&self) -> Option<f64> {
+        self.duration.map(|d| d.as_secs_f64())
+    }
+
     pub fn current_subtitle(&self) -> Option<&str> {
         self.current_subtitle.as_deref()
     }
@@ -184,13 +194,14 @@ impl VideoState {
             }
         }
 
-        let secs = delta_secs.abs() as i64;
-        let msg = if delta_secs < 0.0 {
-            format!("\u{2212}{secs}s")
+        let sign = if delta_secs < 0.0 { "\u{2212}" } else { "+" };
+        let mag = delta_secs.abs() as i64;
+        let label = if mag >= 60 && mag % 60 == 0 {
+            format!("{}m", mag / 60)
         } else {
-            format!("+{secs}s")
+            format!("{mag}s")
         };
-        self.set_osd(msg);
+        self.set_osd(format!("{sign}{label}"));
     }
 
     pub fn cycle_audio_track(&mut self) {

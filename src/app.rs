@@ -62,6 +62,67 @@ fn draw_subtitle(painter: &egui::Painter, area: Rect, text: &str) {
     painter.text(pos, anchor, text, font, Color32::WHITE);
 }
 
+/// Format a duration in seconds as `M:SS` (or `H:MM:SS` past an hour).
+fn format_time(secs: f64) -> String {
+    let s = secs.max(0.0) as i64;
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{sec:02}")
+    } else {
+        format!("{m}:{sec:02}")
+    }
+}
+
+/// Draw a graphical seek/progress bar near the bottom of `area`, with the
+/// current position and total duration. Falls back to a bare elapsed-time label
+/// when the duration is unknown (no meaningful fraction to fill).
+fn draw_seek_bar(painter: &egui::Painter, area: Rect, pos_secs: f64, dur_secs: Option<f64>) {
+    let margin = (area.width() * 0.05).clamp(16.0, 120.0);
+    let left = area.min.x + margin;
+    let right = area.max.x - margin;
+    if right <= left {
+        return;
+    }
+    let track_y = area.max.y - 28.0;
+    let track_h = 6.0;
+
+    let font = egui::FontId::proportional(14.0);
+    let label = match dur_secs {
+        Some(d) => format!("{} / {}", format_time(pos_secs), format_time(d)),
+        None => format_time(pos_secs),
+    };
+    // Time label sits just above the track, right-aligned to the track end.
+    painter.text(
+        Pos2::new(right, track_y - track_h - 4.0),
+        egui::Align2::RIGHT_BOTTOM,
+        &label,
+        font,
+        Color32::WHITE,
+    );
+
+    let Some(dur) = dur_secs.filter(|d| *d > 0.0) else {
+        return;
+    };
+    let frac = (pos_secs / dur).clamp(0.0, 1.0) as f32;
+    let track = Rect::from_min_max(
+        Pos2::new(left, track_y),
+        Pos2::new(right, track_y + track_h),
+    );
+    let radius = track_h / 2.0;
+    // Background track, then the elapsed fill, then a playhead knob.
+    painter.rect_filled(track, radius, Color32::from_black_alpha(160));
+    let fill_x = left + (right - left) * frac;
+    let fill = Rect::from_min_max(Pos2::new(left, track_y), Pos2::new(fill_x, track_y + track_h));
+    painter.rect_filled(fill, radius, Color32::from_rgb(230, 230, 230));
+    painter.circle_filled(
+        Pos2::new(fill_x, track_y + track_h / 2.0),
+        track_h,
+        Color32::WHITE,
+    );
+}
+
 /// Draw a transient on-screen status message in the top-left of `area`.
 fn draw_osd(painter: &egui::Painter, area: Rect, text: &str) {
     let font = egui::FontId::proportional(18.0);
@@ -590,11 +651,13 @@ impl ImageViewerApp {
             if ctx.input(|i| i.key_pressed(egui::Key::S)) {
                 if let Some(v) = &mut self.video { v.cycle_subtitle_track(); }
             }
+            // Ctrl+Arrow skips a minute; plain arrows skip 5 seconds.
+            let seek_step = if ctx.input(|i| i.modifiers.ctrl) { 60.0 } else { 5.0 };
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                if let Some(v) = &mut self.video { v.seek_relative(5.0); }
+                if let Some(v) = &mut self.video { v.seek_relative(seek_step); }
             }
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                if let Some(v) = &mut self.video { v.seek_relative(-5.0); }
+                if let Some(v) = &mut self.video { v.seek_relative(-seek_step); }
             }
             if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
                 self.next_image(ctx);
@@ -677,6 +740,8 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
                 }
                 if let Some(osd) = video.osd_text() {
                     draw_osd(ui.painter(), available_rect, osd);
+                    // Graphical seek/progress bar, shown transiently with the OSD.
+                    draw_seek_bar(ui.painter(), available_rect, video.position_secs(), video.duration_secs());
                 }
 
                 // Keep frames flowing while playing; idle gently when paused.
