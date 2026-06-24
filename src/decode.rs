@@ -323,6 +323,7 @@ pub fn scan_supported_images(dir: &Path) -> Vec<PathBuf> {
         &RAW_SUPPORTED_FORMATS[..],
         &FITS_SUPPORTED_FORMATS[..],
         &JXL_SUPPORTED_FORMATS[..],
+        &VIDEO_SUPPORTED_FORMATS[..],
     ]
     .concat();
 
@@ -342,6 +343,17 @@ pub fn scan_supported_images(dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort_by_key(|name| name.to_string_lossy().to_lowercase());
     files
+}
+
+/// True if `path` has a recognized video extension. Video files are routed to
+/// the ffmpeg-backed player rather than the image decode pipeline.
+pub fn is_video_file(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    VIDEO_SUPPORTED_FORMATS.contains(&ext.as_str())
 }
 
 pub fn get_absolute_path(filename: &str) -> Result<PathBuf, String> {

@@ -12,8 +12,9 @@ use std::{
 };
 
 use crate::cache::{load_preload_cache, preload_cache_path};
-use crate::decode::{downscale_color_image, scan_supported_images, to_egui_color_image};
+use crate::decode::{downscale_color_image, is_video_file, scan_supported_images, to_egui_color_image};
 use crate::thumbnail::load_embedded_thumbnail;
+use crate::video_state::VideoState;
 use crate::types::{
     Animation, AnimationFrame, DisplayableImage, FullResRequest, FullResWorker, LoadedImage,
     MemoryGate, PreloadState,
@@ -26,8 +27,56 @@ const TILE_SIZE: usize = 1024; // Use tiles of 1024x1024 pixels for the detail v
 /// the bulk preload so the app doesn't sit there silently forever.
 const FULL_RES_WATCHDOG: Duration = Duration::from_secs(20);
 
+/// Fit `content` (in pixels) into `area`, preserving aspect ratio and centering.
+/// Used to letterbox/pillarbox video frames in the central panel.
+fn fit_centered(content: Vec2, area: Rect) -> Rect {
+    if content.x <= 0.0 || content.y <= 0.0 {
+        return area;
+    }
+    let aspect = content.x / content.y;
+    let area_aspect = area.width() / area.height();
+    let mut size = area.size();
+    if aspect > area_aspect {
+        size.y = size.x / aspect;
+    } else {
+        size.x = size.y * aspect;
+    }
+    let offset = (area.size() - size) / 2.0;
+    Rect::from_min_size(area.min + offset, size)
+}
+
+/// Draw a subtitle line centered near the bottom of `area`, with a black
+/// outline so it stays legible over any frame.
+fn draw_subtitle(painter: &egui::Painter, area: Rect, text: &str) {
+    let font = egui::FontId::proportional((area.height() * 0.045).clamp(18.0, 40.0));
+    let anchor = egui::Align2::CENTER_BOTTOM;
+    let pos = Pos2::new(area.center().x, area.max.y - area.height() * 0.05);
+    for off in [
+        Vec2::new(-1.5, 0.0),
+        Vec2::new(1.5, 0.0),
+        Vec2::new(0.0, -1.5),
+        Vec2::new(0.0, 1.5),
+    ] {
+        painter.text(pos + off, anchor, text, font.clone(), Color32::BLACK);
+    }
+    painter.text(pos, anchor, text, font, Color32::WHITE);
+}
+
+/// Draw a transient on-screen status message in the top-left of `area`.
+fn draw_osd(painter: &egui::Painter, area: Rect, text: &str) {
+    let font = egui::FontId::proportional(18.0);
+    let pos = area.min + Vec2::new(16.0, 16.0);
+    let galley = painter.layout_no_wrap(text.to_string(), font, Color32::WHITE);
+    let bg = Rect::from_min_size(pos, galley.size()).expand(6.0);
+    painter.rect_filled(bg, 4.0, Color32::from_black_alpha(160));
+    painter.galley(pos, galley, Color32::WHITE);
+}
+
 pub struct ImageViewerApp {
     image: Option<DisplayableImage>,
+    /// Active video playback state. Mutually exclusive with `image`: when a
+    /// video is loaded `image` is `None`, and vice versa.
+    video: Option<VideoState>,
     image_files: Vec<PathBuf>,
     current_index: usize,
     image_order: Vec<usize>,
@@ -53,6 +102,7 @@ impl ImageViewerApp {
         let full_res_worker = Some(spawn_full_res_worker(cc.egui_ctx.clone(), memory_gate.clone()));
         let mut app = Self {
             image: None,
+            video: None,
             image_files: Vec::new(),
             current_index: 0,
             image_order: Vec::new(),
@@ -95,6 +145,28 @@ impl ImageViewerApp {
         self.velocity = Vec2::ZERO;
         self.full_res_pending = false;
         self.full_res_pending_since = None;
+
+        // Video files bypass the image decode/cache/tile pipeline entirely and
+        // are handed to the ffmpeg-backed player. Tear down any previous video
+        // first so its decode thread and audio stop deterministically.
+        if is_video_file(&path) {
+            self.video = None;
+            self.image = None;
+            match VideoState::open(&path, ctx) {
+                Ok(state) => {
+                    self.video = Some(state);
+                    self.last_error = None;
+                }
+                Err(e) => {
+                    self.last_error = Some(format!("Failed to open video '{}': {e}", path.display()));
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+
+        // Switching to an image: stop any video that was playing.
+        self.video = None;
 
         if let Some(LoadedImage::Static(preview)) = load_preload_cache(&path) {
             log::info!("Loaded preload-cache preview for '{}' in {:.2?}", path.display(), start_time.elapsed());
@@ -506,11 +578,37 @@ impl ImageViewerApp {
             }
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            self.next_image(ctx);
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            self.prev_image(ctx);
+        if self.video.is_some() {
+            // Video playback controls. Arrows seek; file navigation moves to
+            // PageUp/PageDown so it stays reachable.
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                if let Some(v) = &mut self.video { v.toggle_pause(); }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::A)) {
+                if let Some(v) = &mut self.video { v.cycle_audio_track(); }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::S)) {
+                if let Some(v) = &mut self.video { v.cycle_subtitle_track(); }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                if let Some(v) = &mut self.video { v.seek_relative(5.0); }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                if let Some(v) = &mut self.video { v.seek_relative(-5.0); }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
+                self.next_image(ctx);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
+                self.prev_image(ctx);
+            }
+        } else {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.next_image(ctx);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.prev_image(ctx);
+            }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
             self.first_image(ctx);
@@ -552,7 +650,42 @@ fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
         .show_inside(ui, |ui| {
-            if let Some(image) = &mut self.image {
+            if let Some(video) = &mut self.video {
+                video.tick(&ctx);
+
+                let available_rect = ui.available_rect_before_wrap();
+                // Consume interaction so the area behaves like the image view.
+                let _ = ui.allocate_rect(available_rect, egui::Sense::click());
+
+                if let Some(tex) = video.texture() {
+                    let frame_size = Vec2::new(video.frame_size[0] as f32, video.frame_size[1] as f32);
+                    let rect = fit_centered(frame_size, available_rect);
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(egui::RichText::new("Loading video…").color(Color32::from_gray(180)).size(18.0));
+                    });
+                }
+
+                if let Some(text) = video.current_subtitle() {
+                    draw_subtitle(ui.painter(), available_rect, text);
+                }
+                if let Some(osd) = video.osd_text() {
+                    draw_osd(ui.painter(), available_rect, osd);
+                }
+
+                // Keep frames flowing while playing; idle gently when paused.
+                if video.is_playing() {
+                    ctx.request_repaint_after(Duration::from_millis(8));
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+            } else if let Some(image) = &mut self.image {
                 // Advance animation playback (GIFs). Frames are pre-decoded; we step
                 // forward by wall-clock time and re-upload the active frame whenever it
                 // changes, then schedule a repaint for when the next frame is due.

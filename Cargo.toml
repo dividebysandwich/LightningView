@@ -1,7 +1,7 @@
 [package]
 name = "lightningview"
 description = "A fast image viewer that supports a wide range of image formats."
-version = "2.5.9"
+version = "2.6.0"
 license = "GPLv2"
 edition = "2024"
 build = "build.rs"
@@ -29,6 +29,9 @@ imagepipe = { git = "https://github.com/dividebysandwich/imagepipe", rev="cc9df6
 rayon = "1.12.0"
 jxl-oxide = { version = "0.12.6", features = ["image"] }
 sysinfo = { version = "0.39.3", default-features = false, features = ["system"] }
+anyhow = "1"
+ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
+rodio = { version = "0.22", default-features = false, features = ["playback", "symphonia-all"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_UI_Shell"]}
@@ -47,7 +50,7 @@ codegen-units = 1
 [package.metadata.bundle]
 name = "LightningView"
 identifier = "com.lightningview"
-version = "2.5.9"
+version = "2.6.0"
 license = "GPLv2"
 icon = ["logo_256.png"]
 copyright = "2025-2026, the LightningView developers"

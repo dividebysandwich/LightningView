@@ -4,11 +4,15 @@ use eframe::egui;
 use std::{env, error::Error, path::PathBuf};
 
 mod app;
+mod audio;
 mod cache;
 mod decode;
 mod formats;
+mod subtitles;
 mod thumbnail;
 mod types;
+mod video;
+mod video_state;
 mod workers;
 
 use crate::app::ImageViewerApp;

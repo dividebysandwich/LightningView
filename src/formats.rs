@@ -5,3 +5,4 @@ pub const IMAGE_RS_SUPPORTED_FORMATS: [&str; 9] = ["jpg", "jpeg", "png", "bmp", 
 pub const RAW_SUPPORTED_FORMATS: [&str; 24] = ["mrw", "arw", "srf", "sr2", "nef", "mef", "orf", "srw", "erf", "kdc", "dcs", "rw2", "raf", "dcr", "dng", "pef", "crw", "iiq", "3fr", "nrw", "mos", "cr2", "ari", "ori"];
 pub const FITS_SUPPORTED_FORMATS: [&str; 2] = ["fits", "fit"];
 pub const JXL_SUPPORTED_FORMATS: [&str; 1] = ["jxl"];
+pub const VIDEO_SUPPORTED_FORMATS: [&str; 11] = ["mp4", "mkv", "webm", "avi", "mov", "m4v", "mpg", "mpeg", "wmv", "flv", "ts"];
