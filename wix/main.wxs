@@ -181,6 +181,17 @@
                         <Extension Id='ori' />
                         <Extension Id='fit' />
                         <Extension Id='fits' />
+                        <Extension Id='mp4' />
+                        <Extension Id='mkv' />
+                        <Extension Id='webm' />
+                        <Extension Id='avi' />
+                        <Extension Id='mov' />
+                        <Extension Id='m4v' />
+                        <Extension Id='mpg' />
+                        <Extension Id='mpeg' />
+                        <Extension Id='wmv' />
+                        <Extension Id='flv' />
+                        <Extension Id='ts' />
                     </ProgId>
                     <RegistryKey Root='HKLM' Key='SOFTWARE\LightningView\Capabilities'>
                         <RegistryValue Name='ApplicationName' Value='LightningView' Type='string' />
@@ -230,13 +241,55 @@
                         <RegistryValue Name='.ori' Value='LightningView.Image.1' Type='string' />
                         <RegistryValue Name='.fit' Value='LightningView.Image.1' Type='string' />
                         <RegistryValue Name='.fits' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mp4' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mkv' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.webm' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.avi' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mov' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.m4v' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mpg' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.mpeg' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.wmv' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.flv' Value='LightningView.Image.1' Type='string' />
+                        <RegistryValue Name='.ts' Value='LightningView.Image.1' Type='string' />
                     </RegistryKey>
                     
                     <RegistryKey Root='HKLM' Key='SOFTWARE\RegisteredApplications'>
                         <RegistryValue Name='LightningView' Value='SOFTWARE\LightningView\Capabilities' Type='string' />
                     </RegistryKey>
                     </Component>
-				
+
+                    <!--
+                      FFmpeg 8.1.x (gyan.dev full-shared, LGPL) runtime libraries
+                      for video playback. The soname-versioned DLL names below
+                      (avcodec-62, avutil-60, ...) match the FFmpeg build pinned
+                      in .github/workflows/release.yml; bumping to a new FFmpeg
+                      major version means updating these names to match the new
+                      sonames or the MSI build will fail to find the files. The
+                      DLLs are staged next to lightningview.exe during the build,
+                      so the $(var.CargoTargetBinDir) sources resolve.
+                    -->
+                    <Component Id='dll_avcodec' Guid='*'>
+                        <File Id='avcodec' Name='avcodec-62.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\avcodec-62.dll' KeyPath='yes' />
+                    </Component>
+                    <Component Id='dll_avformat' Guid='*'>
+                        <File Id='avformat' Name='avformat-62.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\avformat-62.dll' KeyPath='yes' />
+                    </Component>
+                    <Component Id='dll_avutil' Guid='*'>
+                        <File Id='avutil' Name='avutil-60.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\avutil-60.dll' KeyPath='yes' />
+                    </Component>
+                    <Component Id='dll_swresample' Guid='*'>
+                        <File Id='swresample' Name='swresample-6.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\swresample-6.dll' KeyPath='yes' />
+                    </Component>
+                    <Component Id='dll_swscale' Guid='*'>
+                        <File Id='swscale' Name='swscale-9.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\swscale-9.dll' KeyPath='yes' />
+                    </Component>
+
                 </Directory>
             </Directory>
         </Directory>
@@ -258,7 +311,12 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
-			
+            <ComponentRef Id='dll_avcodec'/>
+            <ComponentRef Id='dll_avformat'/>
+            <ComponentRef Id='dll_avutil'/>
+            <ComponentRef Id='dll_swresample'/>
+            <ComponentRef Id='dll_swscale'/>
+
             <Feature
                 Id='Environment'
                 Title='PATH Environment Variable'

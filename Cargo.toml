@@ -102,7 +102,17 @@ linux_mime_types = [
     "image/x-sigma-x3f",
     "image/x-samsung-srw",
     "image/x-panasonic-rw2",
-	"application/fits"
+	"application/fits",
+    "video/mp4",
+    "video/x-matroska",
+    "video/webm",
+    "video/x-msvideo",
+    "video/quicktime",
+    "video/x-m4v",
+    "video/mpeg",
+    "video/x-ms-wmv",
+    "video/x-flv",
+    "video/mp2t"
 ]
 
 [patch."https://github.com/dividebysandwich/dnglab"]

@@ -19,6 +19,11 @@ finish-args:
   - --device=dri
   - --share=ipc
 
+  # --- Audio ---
+  # Video playback outputs sound; the freedesktop runtime's ffmpeg libs decode
+  # it and rodio/cpal route it to PulseAudio.
+  - --socket=pulseaudio
+
   # --- File Access ---
   # Essential for an image viewer to open files passed as arguments
   # from anywhere on the system (e.g. "Open With").
@@ -38,6 +43,10 @@ build-options:
   env:
     # Use the in-tree .cargo/config.toml + vendor/ that the CI step prepared.
     CARGO_HOME: .cargo
+    # ffmpeg-sys-next builds bindings with bindgen, which needs libclang from
+    # the llvm20 SDK extension. The runtime/SDK provide the ffmpeg dev headers
+    # and pkg-config files that ffmpeg-sys-next discovers.
+    LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
 
 modules:
   - name: lightningview

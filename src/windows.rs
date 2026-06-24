@@ -7,7 +7,7 @@ use std::{
 };
 use winreg::{enums::*, RegKey};
 
-use crate::formats::{IMAGE_RS_SUPPORTED_FORMATS, FITS_SUPPORTED_FORMATS, IMAGEREADER_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS};
+use crate::formats::{IMAGE_RS_SUPPORTED_FORMATS, FITS_SUPPORTED_FORMATS, IMAGEREADER_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS, VIDEO_SUPPORTED_FORMATS};
 const CANONICAL_NAME: &str = "lightningview.exe";
 // Must match the ProgId the WiX installer registers (wix/main.wxs). Using the same
 // ProgId for the manual `/register` path and the installer prevents two different
@@ -111,6 +111,7 @@ pub fn register_urlhandler() -> io::Result<()> {
         all_supported_formats.extend(&IMAGE_RS_SUPPORTED_FORMATS);
         all_supported_formats.extend(&FITS_SUPPORTED_FORMATS);
         all_supported_formats.extend(&RAW_SUPPORTED_FORMATS);
+        all_supported_formats.extend(&VIDEO_SUPPORTED_FORMATS);
 
         for filetype in all_supported_formats {
             dprog_capabilities_fileassociations.set_value(filetype, &PROGID)?;
