@@ -16,6 +16,11 @@ use crate::video::{frame_to_color_image, VideoStream};
 
 const OSD_DURATION: Duration = Duration::from_millis(2000);
 
+/// Time constant for the master-clock low-pass filter. Long enough to smooth a
+/// coarse audio-callback staircase down to a few ms of ripple, short enough to
+/// settle within a couple of seconds after the initial sync / a seek.
+const CLOCK_SMOOTH_TAU_SECS: f64 = 1.5;
+
 pub struct VideoState {
     stream: VideoStream,
     /// `None` when no audio output device could be opened.
@@ -31,6 +36,16 @@ pub struct VideoState {
     active_subtitle_track: Option<usize>,
     current_subtitle: Option<String>,
     paused: bool,
+
+    // Smoothed master clock. The raw audio clock advances in bursts — one step
+    // per output-buffer callback — so reading it directly to pick the video
+    // frame makes the picture hold still then skip several frames at the
+    // callback rate. Instead we advance this clock by real elapsed time and
+    // gently correct it toward the raw audio clock, tracking audio without
+    // reproducing its staircase (the judder VLC/jellyfin avoid the same way).
+    smooth_clock_secs: f64,
+    clock_initialized: bool,
+    last_clock_tick: Option<Instant>,
 
     // Wall-clock fallback (used only when `use_audio_clock` is false).
     wall_base_secs: f64,
@@ -79,14 +94,18 @@ impl VideoState {
             active_subtitle_track: None,
             current_subtitle: None,
             paused: false,
+            smooth_clock_secs: 0.0,
+            clock_initialized: false,
+            last_clock_tick: None,
             wall_base_secs: 0.0,
             wall_started: Some(Instant::now()),
             osd: None,
         })
     }
 
-    /// Current playback time in seconds (the A/V master clock).
-    fn clock_secs(&self) -> f64 {
+    /// The unsmoothed master clock: the audio sink position (minus the A/V
+    /// offset) when audio drives playback, else the wall-clock fallback.
+    fn raw_clock_secs(&self) -> f64 {
         if self.use_audio_clock {
             if let Some(a) = &self.audio {
                 return (a.position().as_secs_f64() - self.av_offset_secs).max(0.0);
@@ -98,10 +117,56 @@ impl VideoState {
         }
     }
 
+    /// Advance the smoothed clock toward the raw clock and return it. The wall
+    /// path is already smooth, so it passes through; the audio path is
+    /// low-pass filtered to remove the per-callback staircase.
+    fn advance_clock(&mut self) -> f64 {
+        let raw = self.raw_clock_secs();
+
+        // The wall clock is monotonic and smooth already; nothing to filter.
+        if !self.use_audio_clock {
+            self.smooth_clock_secs = raw;
+            self.clock_initialized = true;
+            return raw;
+        }
+
+        let now = Instant::now();
+        let dt = self
+            .last_clock_tick
+            .map(|t| (now - t).as_secs_f64())
+            .unwrap_or(0.0);
+        self.last_clock_tick = Some(now);
+
+        // Resync hard on the first tick, while paused, after a long stall, or on
+        // any large discontinuity (a seek). Seeks are >=5s, far above 1s, while
+        // a normal staircase step (one audio buffer) stays well under it.
+        if !self.clock_initialized
+            || self.paused
+            || dt > 0.5
+            || (raw - self.smooth_clock_secs).abs() > 1.0
+        {
+            self.smooth_clock_secs = raw;
+            self.clock_initialized = true;
+            return raw;
+        }
+
+        // Run forward in real time, then nudge toward audio with a slow
+        // (time-constant based) correction. Because the raw clock is centered on
+        // true playback, filtering its staircase out introduces no net A/V lag;
+        // the long time constant attenuates even a coarse (hundreds-of-ms)
+        // staircase to a few ms of ripple, well under one frame. Audio-vs-system
+        // crystal drift is only ~ppm, so this slow correction tracks it easily.
+        self.smooth_clock_secs += dt;
+        let err = raw - self.smooth_clock_secs;
+        let alpha = 1.0 - (-dt / CLOCK_SMOOTH_TAU_SECS).exp();
+        self.smooth_clock_secs += err * alpha;
+        self.smooth_clock_secs
+    }
+
     /// Pull the frame for the current clock and upload it; refresh the active
     /// subtitle line. Called once per UI frame.
     pub fn tick(&mut self, ctx: &Context) {
-        let clock = self.clock_secs();
+        let clock = self.advance_clock();
         if let Some(frame) = self.stream.frame_at(clock) {
             self.frame_size = [frame.width as usize, frame.height as usize];
             let img = frame_to_color_image(&frame);
@@ -122,9 +187,13 @@ impl VideoState {
         self.texture.as_ref()
     }
 
-    /// Current playback position in seconds (the master clock).
+    /// Current playback position in seconds (the smoothed master clock).
     pub fn position_secs(&self) -> f64 {
-        self.clock_secs()
+        if self.clock_initialized {
+            self.smooth_clock_secs
+        } else {
+            self.raw_clock_secs()
+        }
     }
 
     /// Total duration in seconds, if the container reported one.
@@ -158,7 +227,7 @@ impl VideoState {
         }
         if !self.use_audio_clock {
             if self.paused {
-                self.wall_base_secs = self.clock_secs();
+                self.wall_base_secs = self.raw_clock_secs();
                 self.wall_started = None;
             } else {
                 self.wall_started = Some(Instant::now());
@@ -186,7 +255,7 @@ impl VideoState {
                 let _ = a.seek_relative(delta_secs, self.duration);
             }
         } else {
-            let target = (self.clock_secs() + delta_secs).clamp(0.0, max);
+            let target = (self.raw_clock_secs() + delta_secs).clamp(0.0, max);
             self.stream.seek(Duration::from_secs_f64(target));
             self.wall_base_secs = target;
             if self.wall_started.is_some() {
