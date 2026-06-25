@@ -187,25 +187,47 @@ fn current_exe_name() -> String {
 /// an MSI install leaves exactly one clean set of "Open with" / Default Programs
 /// entries. Safe to call repeatedly and when nothing is registered.
 pub fn cleanup_registrations() {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let exe_name = current_exe_name();
+    let applications_path = format!(r"SOFTWARE\Classes\Applications\{}", exe_name);
+    let app_paths_path = format!("{}{}", APPREG_BASE, exe_name);
 
-    // Current HKCU registration written by register_urlhandler().
-    let _ = hkcu.delete_subkey_all(DPROG_PATH);
-    let _ = hkcu.delete_subkey_all(PROGID_PATH);
-    let _ = hkcu.delete_subkey_all(format!("{}{}", APPREG_BASE, exe_name));
+    // Sweep both hives. HKLM deletes only succeed when elevated (e.g. the user runs
+    // `/cleanup` from an admin prompt, or a future installer action); when not
+    // elevated they simply fail and are ignored. The installer's own machine-wide
+    // registration uses different keys (SOFTWARE\LightningView\Capabilities,
+    // RegisteredApplications\LightningView, HKLM Classes\LightningView.Image.1) and
+    // is intentionally NOT removed here.
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let root = RegKey::predef(hive);
 
-    // Legacy Rust-only ProgId from versions before the ProgId was unified with the
-    // installer — the source of the duplicate "lightningview" entry.
-    let _ = hkcu.delete_subkey_all(LEGACY_PROGID_PATH);
+        // The per-app handler Windows auto-creates the first time a user browses to
+        // the exe in "Open with → Choose another app". A stale one points at an old
+        // install path and is the usual cause of a *second* "LightningView" entry
+        // that launches a different instance.
+        let _ = root.delete_subkey_all(&applications_path);
 
-    // RegisteredApplications entries are *values* under the key, not subkeys, so they
-    // must be removed with delete_value (the previous delete_subkey was a no-op).
-    if let Ok(registered_applications) =
-        hkcu.open_subkey_with_flags(REGISTERED_APPLICATIONS_KEY, KEY_SET_VALUE)
-    {
-        let _ = registered_applications.delete_value(DISPLAY_NAME);
+        // Legacy Rust-only ProgId (pre-2.5.10) — shows up as its own extra entry.
+        let _ = root.delete_subkey_all(LEGACY_PROGID_PATH);
+
+        // Default Programs / StartMenuInternet + App Paths written by `/register`.
+        let _ = root.delete_subkey_all(DPROG_PATH);
+        let _ = root.delete_subkey_all(&app_paths_path);
+
+        // RegisteredApplications entries are *values* under the key, not subkeys, so
+        // they must be removed with delete_value (the previous delete_subkey was a
+        // no-op).
+        if let Ok(registered_applications) =
+            root.open_subkey_with_flags(REGISTERED_APPLICATIONS_KEY, KEY_SET_VALUE)
+        {
+            let _ = registered_applications.delete_value(DISPLAY_NAME);
+        }
     }
+
+    // The unified ProgId (LightningView.Image.1) is the installer's canonical
+    // machine-wide (HKLM) registration — leave that. Only remove a per-user (HKCU)
+    // copy, which would shadow it and can launch a stale exe path.
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let _ = hkcu.delete_subkey_all(PROGID_PATH);
 
     refresh_shell();
 }
