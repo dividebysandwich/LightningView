@@ -28,8 +28,46 @@ mod windows;
 use crate::windows::*;
 
 // --- Main Entry Point ---
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() {
     env_logger::init();
+    // The release build is `windows_subsystem = "windows"`, so there's no console
+    // and stderr is invisible — without this a startup panic/error just flashes a
+    // window and vanishes. Surface both the panic and the `run()` error paths via
+    // a message box (and a log file) so failures are diagnosable.
+    std::panic::set_hook(Box::new(|info| {
+        report_fatal(&format!("LightningView crashed:\n\n{info}"));
+    }));
+
+    if let Err(e) = run() {
+        let mut msg = format!("LightningView failed to start:\n\n{e}");
+        let mut src = e.source();
+        while let Some(s) = src {
+            msg.push_str(&format!("\n  caused by: {s}"));
+            src = s.source();
+        }
+        report_fatal(&msg);
+        std::process::exit(1);
+    }
+}
+
+/// Present a fatal error to the user (and persist it). The GUI-subsystem build has
+/// no console, so a message box + temp-file log are the only visible channels.
+fn report_fatal(msg: &str) {
+    log::error!("{msg}");
+    let log_path = std::env::temp_dir().join("lightningview-error.log");
+    let _ = std::fs::write(&log_path, msg);
+    let shown = format!("{msg}\n\n(A copy was saved to {})", log_path.display());
+    let _ = sdl3::messagebox::show_simple_message_box(
+        sdl3::messagebox::MessageBoxFlag::ERROR,
+        "LightningView",
+        &shown,
+        None::<&sdl3::video::Window>,
+    );
+    #[cfg(not(target_os = "windows"))]
+    eprintln!("{msg}");
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
     clear_old_preload_cache();
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {

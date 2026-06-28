@@ -32,11 +32,67 @@ use sdl3::VideoSubsystem;
 use crate::geom::{Rect, Vec2};
 use crate::types::PixelBuf;
 
-// Compiled SPIR-V produced by build.rs (glslc). When DXIL/MSL backends are added
-// these will gain sibling blobs selected via `device.get_shader_formats()`.
-const QUAD_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.vert.spv"));
-const QUAD_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.frag.spv"));
-const VIDEO_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/video.frag.spv"));
+// Per-shader bytecode in every backend format SDL_GPU might want: SPIR-V
+// (Vulkan), DXIL (D3D12), MSL (Metal). build.rs always produces the SPIR-V from
+// the GLSL source, then transpiles it to DXIL/MSL via SDL_shadercross when that
+// tool is available (the CI Windows/macOS jobs install it). When a format wasn't
+// produced, build.rs writes an empty placeholder so `include_bytes!` still
+// compiles, and the renderer simply doesn't advertise that format.
+struct ShaderBlobs {
+    spirv: &'static [u8],
+    dxil: &'static [u8],
+    msl: &'static [u8],
+}
+
+macro_rules! shader_blobs {
+    ($name:literal) => {
+        ShaderBlobs {
+            spirv: include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".spv")),
+            dxil: include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".dxil")),
+            msl: include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".msl")),
+        }
+    };
+}
+
+const QUAD_VERT: ShaderBlobs = shader_blobs!("quad.vert");
+const QUAD_FRAG: ShaderBlobs = shader_blobs!("quad.frag");
+const VIDEO_FRAG: ShaderBlobs = shader_blobs!("video.frag");
+
+/// The shader formats we can actually supply, i.e. those whose blobs are present.
+/// SPIR-V is the always-available baseline; DXIL/MSL are added only when built.
+fn available_shader_formats() -> ShaderFormat {
+    let mut f = ShaderFormat::SPIRV;
+    if !QUAD_VERT.dxil.is_empty() {
+        f = f | ShaderFormat::DXIL;
+    }
+    if !QUAD_VERT.msl.is_empty() {
+        f = f | ShaderFormat::MSL;
+    }
+    f
+}
+
+/// Pick the bytecode + format + entry point for `blobs` matching what the device
+/// consumes (`device.get_shader_formats()`). Prefers the platform-native format
+/// (DXIL on D3D12, MSL on Metal) and falls back to SPIR-V (Vulkan).
+fn select_shader(
+    blobs: &ShaderBlobs,
+    device_formats: ShaderFormat,
+) -> Result<(&'static [u8], ShaderFormat, &'static std::ffi::CStr)> {
+    let has = |fmt: ShaderFormat| device_formats & fmt == fmt;
+    if has(ShaderFormat::DXIL) && !blobs.dxil.is_empty() {
+        Ok((blobs.dxil, ShaderFormat::DXIL, c"main"))
+    } else if has(ShaderFormat::MSL) && !blobs.msl.is_empty() {
+        // SPIRV-Cross (used by shadercross) renames the entry point for MSL.
+        Ok((blobs.msl, ShaderFormat::MSL, c"main0"))
+    } else if has(ShaderFormat::SPIRV) && !blobs.spirv.is_empty() {
+        Ok((blobs.spirv, ShaderFormat::SPIRV, c"main"))
+    } else {
+        Err(anyhow!(
+            "no shader available for this GPU backend (device formats {device_formats:?}); \
+             the DXIL/MSL shaders may not have been built (SDL_shadercross missing at build time)"
+        ))
+    }
+}
 
 /// RGBA colour with components in `0.0..=1.0`.
 pub type Rgba = [f32; 4];
@@ -216,8 +272,18 @@ impl Renderer {
         }
         let window = builder.build().map_err(|e| anyhow!("create window: {e}"))?;
 
-        let device = Device::new(ShaderFormat::SPIRV, cfg!(debug_assertions))
-            .map_err(|e| anyhow!("create GPU device: {e}"))?
+        // Advertise every shader format we actually shipped blobs for, so SDL can
+        // pick its preferred backend per platform: D3D12 (DXIL) on Windows, Metal
+        // (MSL) on macOS, Vulkan (SPIR-V) on Linux. If only SPIR-V is present
+        // (e.g. DXIL/MSL weren't built), this still works wherever Vulkan exists.
+        let formats = available_shader_formats();
+        let device = Device::new(formats, cfg!(debug_assertions))
+            .map_err(|e| {
+                anyhow!(
+                    "create GPU device: {e}. No supported GPU backend was found for the \
+                     available shader formats ({formats:?}); update your GPU drivers."
+                )
+            })?
             .with_window(&window)
             .map_err(|e| anyhow!("claim window for GPU: {e}"))?;
 
@@ -228,8 +294,8 @@ impl Renderer {
             sdl3::gpu::SwapchainComposition::Sdr,
         );
 
-        let pipeline = build_pipeline(&device, &window, QUAD_FRAG_SPV, 1, 1)?;
-        let video_pipeline = build_pipeline(&device, &window, VIDEO_FRAG_SPV, 2, 1)?;
+        let pipeline = build_pipeline(&device, &window, &QUAD_FRAG, 1, 1)?;
+        let video_pipeline = build_pipeline(&device, &window, &VIDEO_FRAG, 2, 1)?;
 
         let sampler = device
             .create_sampler(
@@ -360,8 +426,8 @@ impl Renderer {
 
         // The swapchain texture format changes with composition (e.g. R10G10B10A2
         // for HDR10, RGBA16F for scRGB), so the pipelines must be rebuilt to match.
-        let quad = build_pipeline(&self.device, &self.window, QUAD_FRAG_SPV, 1, 1);
-        let video = build_pipeline(&self.device, &self.window, VIDEO_FRAG_SPV, 2, 1);
+        let quad = build_pipeline(&self.device, &self.window, &QUAD_FRAG, 1, 1);
+        let video = build_pipeline(&self.device, &self.window, &VIDEO_FRAG, 2, 1);
         match (quad, video) {
             (Ok(q), Ok(v)) => {
                 self.pipeline = q;
@@ -864,22 +930,26 @@ fn upload_plane(
 fn build_pipeline(
     device: &Device,
     window: &Window,
-    frag_code: &[u8],
+    frag: &ShaderBlobs,
     num_samplers: u32,
     num_frag_uniforms: u32,
 ) -> Result<GraphicsPipeline> {
+    let formats = device.get_shader_formats();
+    let (vert_code, vert_fmt, vert_entry) = select_shader(&QUAD_VERT, formats)?;
+    let (frag_code, frag_fmt, frag_entry) = select_shader(frag, formats)?;
+
     let vert = device
         .create_shader()
-        .with_code(ShaderFormat::SPIRV, QUAD_VERT_SPV, ShaderStage::Vertex)
-        .with_entrypoint(c"main")
+        .with_code(vert_fmt, vert_code, ShaderStage::Vertex)
+        .with_entrypoint(vert_entry)
         .build()
         .map_err(|e| anyhow!("build vertex shader: {e}"))?;
     let frag = device
         .create_shader()
-        .with_code(ShaderFormat::SPIRV, frag_code, ShaderStage::Fragment)
+        .with_code(frag_fmt, frag_code, ShaderStage::Fragment)
         .with_samplers(num_samplers)
         .with_uniform_buffers(num_frag_uniforms)
-        .with_entrypoint(c"main")
+        .with_entrypoint(frag_entry)
         .build()
         .map_err(|e| anyhow!("build fragment shader: {e}"))?;
 

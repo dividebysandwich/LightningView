@@ -177,6 +177,51 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo install cargo-bundle
 
+      # SDL_GPU consumes a different shader bytecode per backend: DXIL on Windows
+      # (D3D12) and MSL on macOS (Metal). build.rs transpiles our SPIR-V to those
+      # via the `shadercross` CLI, so it must be on PATH for the build on those
+      # platforms. Linux uses SPIR-V (Vulkan) directly and needs no shadercross.
+      - name: Install SDL_shadercross (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $h = @{ "User-Agent" = "ci"; "Authorization" = "Bearer $env:GH_TOKEN" }
+          $rels = Invoke-RestMethod "https://api.github.com/repos/libsdl-org/SDL_shadercross/releases?per_page=20" -Headers $h
+          $asset = $rels | ForEach-Object { $_.assets } |
+            Where-Object { $_.name -match "(?i)win" -and $_.name -match "(?i)(x64|amd64|win64)" -and $_.name -match "\.zip$" } |
+            Select-Object -First 1
+          if (-not $asset) { throw "No Windows SDL_shadercross asset found. Available: $((($rels | ForEach-Object { $_.assets }).name) -join ', ')" }
+          Write-Host "Downloading $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile sc.zip -UseBasicParsing
+          Expand-Archive sc.zip -DestinationPath sc -Force
+          $exe = Get-ChildItem -Recurse -Filter shadercross.exe sc | Select-Object -First 1
+          if (-not $exe) { throw "shadercross.exe not found in the downloaded archive." }
+          echo "$($exe.DirectoryName)" >> $env:GITHUB_PATH
+
+      - name: Install SDL_shadercross (macOS)
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(curl -sL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/libsdl-org/SDL_shadercross/releases?per_page=20" \
+            | python3 -c "import sys,json,re
+          rels=json.load(sys.stdin)
+          assets=[a for r in rels for a in r.get('assets',[])]
+          m=[a for a in assets if re.search(r'(?i)(macos|darwin|apple|mac)', a['name'])]
+          print(m[0]['browser_download_url'] if m else '')")
+          if [ -z "$url" ]; then echo 'No macOS SDL_shadercross asset found; check the releases page.'; exit 1; fi
+          echo "Downloading $url"
+          curl -sL "$url" -o sc.archive
+          mkdir -p sc
+          tar xf sc.archive -C sc 2>/dev/null || (cd sc && unzip -o ../sc.archive)
+          bin=$(dirname "$(find sc -name shadercross -type f | head -1)")
+          if [ -z "$bin" ]; then echo 'shadercross binary not found in archive'; exit 1; fi
+          chmod +x "$bin/shadercross"
+          echo "$bin" >> "$GITHUB_PATH"
+
       - name: Run build (Linux/Windows)
         if: runner.os != 'macOS'
         run: cargo build --release --verbose --target $TARGET
@@ -310,6 +355,25 @@ jobs:
 
       - name: Install cargo-wix
         run: cargo install cargo-wix
+
+      # Windows build needs DXIL shaders; build.rs transpiles SPIR-V via shadercross.
+      - name: Install SDL_shadercross
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $h = @{ "User-Agent" = "ci"; "Authorization" = "Bearer $env:GH_TOKEN" }
+          $rels = Invoke-RestMethod "https://api.github.com/repos/libsdl-org/SDL_shadercross/releases?per_page=20" -Headers $h
+          $asset = $rels | ForEach-Object { $_.assets } |
+            Where-Object { $_.name -match "(?i)win" -and $_.name -match "(?i)(x64|amd64|win64)" -and $_.name -match "\.zip$" } |
+            Select-Object -First 1
+          if (-not $asset) { throw "No Windows SDL_shadercross asset found. Available: $((($rels | ForEach-Object { $_.assets }).name) -join ', ')" }
+          Write-Host "Downloading $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile sc.zip -UseBasicParsing
+          Expand-Archive sc.zip -DestinationPath sc -Force
+          $exe = Get-ChildItem -Recurse -Filter shadercross.exe sc | Select-Object -First 1
+          if (-not $exe) { throw "shadercross.exe not found in the downloaded archive." }
+          echo "$($exe.DirectoryName)" >> $env:GITHUB_PATH
 
       - name: Build release binary
         run: cargo build --release

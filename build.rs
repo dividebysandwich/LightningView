@@ -77,6 +77,14 @@ fn compile_shaders() {
     let have_glslc =
         !force_prebuilt && Command::new("glslc").arg("--version").output().is_ok();
 
+    // SDL_GPU consumes a different bytecode per backend. D3D12 (Windows) needs
+    // DXIL and Metal (macOS) needs MSL, so on those targets transpiling from the
+    // SPIR-V via SDL_shadercross is mandatory — without it the app could only run
+    // under Vulkan. Elsewhere (Linux/Vulkan) the native formats are optional.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let dxil_required = target_os == "windows";
+    let msl_required = target_os == "macos";
+
     for (src, stage) in shaders {
         let file_name = Path::new(src).file_name().unwrap().to_str().unwrap();
         let prebuilt = format!("{manifest_dir}/shaders/{file_name}.spv");
@@ -113,5 +121,37 @@ fn compile_shaders() {
                 )
             });
         }
+
+        // Produce the per-backend native formats next to the SPIR-V. `gpu.rs`
+        // `include_bytes!`s all three, so an absent format must still exist as an
+        // empty placeholder (the renderer then just won't advertise it).
+        transpile_shader(&out_dir, file_name, stage, "dxil", "DXIL", dxil_required);
+        transpile_shader(&out_dir, file_name, stage, "msl", "MSL", msl_required);
     }
+}
+
+/// Transpile `<out_dir>/<name>.spv` to `<out_dir>/<name>.<ext>` (DXIL/MSL) via the
+/// SDL_shadercross CLI. If shadercross is unavailable or fails, panic when the
+/// format is `required` for this target, otherwise write an empty placeholder.
+fn transpile_shader(out_dir: &str, name: &str, stage: &str, ext: &str, dest: &str, required: bool) {
+    let spv = format!("{out_dir}/{name}.spv");
+    let out = format!("{out_dir}/{name}.{ext}");
+
+    let status = Command::new("shadercross")
+        .args([&spv, "-s", "SPIRV", "-d", dest, "-t", stage, "-o", &out])
+        .status();
+
+    let ok = matches!(&status, Ok(s) if s.success());
+    if ok {
+        return;
+    }
+    if required {
+        panic!(
+            "SDL_shadercross is required to build the {dest} shader for {name} on this \
+             target, but it isn't available (or failed): {status:?}. Install SDL_shadercross \
+             and ensure `shadercross` is on PATH."
+        );
+    }
+    // Optional on this target (e.g. Linux/Vulkan): leave an empty placeholder.
+    std::fs::write(&out, []).expect("write empty shader placeholder");
 }
