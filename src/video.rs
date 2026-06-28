@@ -247,9 +247,13 @@ impl Drop for VideoStream {
     }
 }
 
-/// Map the decoder's colour metadata to our [`ColorInfo`]. Peak/white luminance
-/// use sensible HDR defaults (mastering-display / maxCLL side-data parsing is a
-/// later refinement); BT.2408 puts SDR reference white at 203 nits.
+/// Default source peak luminance (nits) for HDR content with no MaxCLL /
+/// mastering-display metadata — a common HDR10 mastering level.
+const DEFAULT_PEAK_NITS: f32 = 1000.0;
+
+/// Map the decoder's colour metadata to our [`ColorInfo`]. `peak_nits` starts at
+/// the default and is refined from per-frame MaxCLL / mastering-display side data
+/// in the decode loop. BT.2408 puts SDR reference white at 203 nits.
 fn detect_color(decoder: &ffmpeg::codec::decoder::Video) -> ColorInfo {
     use ffmpeg::color::TransferCharacteristic as Trc;
 
@@ -268,9 +272,62 @@ fn detect_color(decoder: &ffmpeg::codec::decoder::Video) -> ColorInfo {
         transfer,
         bt2020_primaries,
         full_range,
-        peak_nits: 1000.0,
+        peak_nits: DEFAULT_PEAK_NITS,
         sdr_white_nits: 203.0,
     }
+}
+
+// FFI layouts of the libavutil HDR side-data structs. bindgen doesn't emit these
+// (nothing in the bound headers references them by value), so we mirror their
+// stable C ABI and cast the raw `SideData::data()` bytes onto them.
+#[repr(C)]
+struct AVContentLightMetadata {
+    max_cll: std::os::raw::c_uint,
+    max_fall: std::os::raw::c_uint,
+}
+
+#[repr(C)]
+struct AVMasteringDisplayMetadata {
+    display_primaries: [[ffmpeg::ffi::AVRational; 2]; 3],
+    white_point: [ffmpeg::ffi::AVRational; 2],
+    min_luminance: ffmpeg::ffi::AVRational,
+    max_luminance: ffmpeg::ffi::AVRational,
+    has_primaries: std::os::raw::c_int,
+    has_luminance: std::os::raw::c_int,
+}
+
+/// Extract the source peak luminance (nits) from a decoded frame's HDR side data.
+/// Prefers MaxCLL (the actual peak of the content); falls back to the mastering
+/// display's max luminance. Returns `None` when neither is present.
+fn read_peak_nits(frame: &Video) -> Option<f32> {
+    use ffmpeg::util::frame::side_data::Type;
+
+    // MaxCLL — maximum content light level (CTA-861.3).
+    if let Some(sd) = frame.side_data(Type::ContentLightLevel) {
+        let data = sd.data();
+        if data.len() >= std::mem::size_of::<AVContentLightMetadata>() {
+            let cll = unsafe { &*(data.as_ptr() as *const AVContentLightMetadata) };
+            if cll.max_cll > 0 {
+                return Some(cll.max_cll as f32);
+            }
+        }
+    }
+
+    // Mastering display max luminance (stored as an AVRational in cd/m²).
+    if let Some(sd) = frame.side_data(Type::MasteringDisplayMetadata) {
+        let data = sd.data();
+        if data.len() >= std::mem::size_of::<AVMasteringDisplayMetadata>() {
+            let m = unsafe { &*(data.as_ptr() as *const AVMasteringDisplayMetadata) };
+            if m.has_luminance != 0 && m.max_luminance.den != 0 {
+                let nits = m.max_luminance.num as f32 / m.max_luminance.den as f32;
+                if nits > 0.0 {
+                    return Some(nits);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn decode_loop(
@@ -293,7 +350,9 @@ fn decode_loop(
     // content (PQ / HLG transfer) is normalised to 10-bit P010 so bit depth is
     // preserved into the GPU tone-mapping shader; everything else collapses to
     // 8-bit NV12. Both keep libswscale on its optimised path.
-    let color = detect_color(&decoder);
+    // `peak_nits` is refined from per-frame MaxCLL / mastering metadata below.
+    let mut color = detect_color(&decoder);
+    let mut luminance_resolved = false;
     let (target_fmt, depth, bps) = if color.is_hdr() {
         (Pixel::P010LE, FrameDepth::Ten, 2usize)
     } else {
@@ -325,7 +384,7 @@ fn decode_loop(
     // Pull the two planes out of the scaled frame, stripping ffmpeg's row padding
     // so each plane is tightly packed for direct GPU upload. `bps` is bytes per
     // sample (1 for NV12, 2 for P010); the chroma plane interleaves two samples.
-    let extract_frame = move |conv: &Video, secs: f64| -> VideoFrame {
+    let extract_frame = move |conv: &Video, secs: f64, color: ColorInfo| -> VideoFrame {
         let w = conv.width() as usize;
         let h = conv.height() as usize;
         let cw = w.div_ceil(2);
@@ -422,11 +481,26 @@ fn decode_loop(
                         }
                     }
 
+                    // Refine the source peak luminance from HDR side data once
+                    // (it's constant per stream); attached to the decoded frame.
+                    if color.is_hdr() && !luminance_resolved {
+                        luminance_resolved = true;
+                        if let Some(peak) = read_peak_nits(&decoded) {
+                            log::info!("HDR source peak luminance: {peak:.0} nits (from metadata)");
+                            color.peak_nits = peak;
+                        } else {
+                            log::info!(
+                                "HDR source peak luminance: {:.0} nits (default; no MaxCLL/mastering metadata)",
+                                color.peak_nits
+                            );
+                        }
+                    }
+
                     let mut conv = Video::empty();
                     if scaler.run(&decoded, &mut conv).is_err() {
                         continue;
                     }
-                    let mut pending = Some(extract_frame(&conv, secs));
+                    let mut pending = Some(extract_frame(&conv, secs, color));
 
                     // Backpressure: wait until the queue has room.
                     while pending.is_some() {
@@ -474,7 +548,7 @@ fn decode_loop(
                         continue;
                     }
                     if let Ok(mut q) = inner.lock() {
-                        q.frames.push_back(extract_frame(&conv, secs));
+                        q.frames.push_back(extract_frame(&conv, secs, color));
                     }
                 }
                 if let Ok(mut q) = inner.lock() {
