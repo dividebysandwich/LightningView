@@ -8,13 +8,22 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use egui::{Context, TextureHandle, TextureOptions};
 
 use crate::audio::AudioPlayer;
+use crate::gpu::{GpuTexture, Renderer};
 use crate::subtitles::{self, SubtitleSet};
-use crate::video::{frame_to_color_image, VideoStream};
+use crate::video::{ColorInfo, FrameDepth, VideoStream};
 
 const OSD_DURATION: Duration = Duration::from_millis(2000);
+
+/// How long the on-screen controls (seek bar + time readout) stay visible after
+/// the last interaction (seek, pause/resume, track change) before fading out.
+const CONTROLS_DURATION: Duration = Duration::from_millis(3500);
+
+/// Safety cap on the post-seek audio hold: if the decoder hasn't produced a
+/// frame at the seek target within this long (decode error, weird file), give up
+/// and resume anyway rather than freezing playback.
+const RESYNC_TIMEOUT: Duration = Duration::from_millis(3000);
 
 /// Time constant for the master-clock low-pass filter. Long enough to smooth a
 /// coarse audio-callback staircase down to a few ms of ripple, short enough to
@@ -29,7 +38,12 @@ pub struct VideoState {
     /// playable audio stream). Otherwise the wall clock below drives playback.
     use_audio_clock: bool,
     subtitles: SubtitleSet,
-    texture: Option<TextureHandle>,
+    /// Current frame's YUV plane textures (luma, interleaved chroma). Replaced
+    /// each time a new frame is uploaded; the GPU video shader converts to RGB.
+    y_tex: Option<GpuTexture>,
+    uv_tex: Option<GpuTexture>,
+    /// Colour description of the most recently uploaded frame (SDR vs HDR, etc.).
+    color: Option<ColorInfo>,
     pub frame_size: [usize; 2],
     duration: Option<Duration>,
     av_offset_secs: f64,
@@ -51,11 +65,22 @@ pub struct VideoState {
     wall_base_secs: f64,
     wall_started: Option<Instant>,
 
+    // Post-seek resync: hold the master clock (and audio) at the seek target
+    // until the decoder produces the target frame, so A/V start together instead
+    // of the video fast-forwarding to catch an audio clock that ran ahead during
+    // the seek's decode latency.
+    resyncing: bool,
+    resync_target: f64,
+    resync_started: Instant,
+
     osd: Option<(String, Instant)>,
+    /// When the seek bar / time HUD was last (re)shown. Refreshed on every
+    /// interaction; the HUD is drawn only while within `CONTROLS_DURATION` of it.
+    controls_shown_at: Instant,
 }
 
 impl VideoState {
-    pub fn open(path: &Path, _ctx: &Context) -> Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         let stream = VideoStream::open(path)?;
         let frame_size = [stream.width as usize, stream.height as usize];
         let duration = stream.duration;
@@ -87,7 +112,9 @@ impl VideoState {
             audio,
             use_audio_clock,
             subtitles,
-            texture: None,
+            y_tex: None,
+            uv_tex: None,
+            color: None,
             frame_size,
             duration,
             av_offset_secs,
@@ -99,7 +126,12 @@ impl VideoState {
             last_clock_tick: None,
             wall_base_secs: 0.0,
             wall_started: Some(Instant::now()),
+            resyncing: false,
+            resync_target: 0.0,
+            resync_started: Instant::now(),
             osd: None,
+            // Show the controls briefly when a video first opens, then fade out.
+            controls_shown_at: Instant::now(),
         })
     }
 
@@ -121,6 +153,13 @@ impl VideoState {
     /// path is already smooth, so it passes through; the audio path is
     /// low-pass filtered to remove the per-callback staircase.
     fn advance_clock(&mut self) -> f64 {
+        // While resyncing after a seek the clock is frozen at the target so the
+        // picture doesn't advance until the decoder has caught up to it.
+        if self.resyncing {
+            self.smooth_clock_secs = self.resync_target;
+            return self.resync_target;
+        }
+
         let raw = self.raw_clock_secs();
 
         // The wall clock is monotonic and smooth already; nothing to filter.
@@ -165,16 +204,42 @@ impl VideoState {
 
     /// Pull the frame for the current clock and upload it; refresh the active
     /// subtitle line. Called once per UI frame.
-    pub fn tick(&mut self, ctx: &Context) {
+    pub fn tick(&mut self, renderer: &Renderer) {
+        // Release the post-seek hold once the target frame is decoded (or the
+        // safety timeout elapses), so audio and video resume together.
+        if self.resyncing && (self.stream.has_queued_frame() || self.resync_started.elapsed() > RESYNC_TIMEOUT) {
+            self.finish_resync();
+        }
+
         let clock = self.advance_clock();
         if let Some(frame) = self.stream.frame_at(clock) {
             self.frame_size = [frame.width as usize, frame.height as usize];
-            let img = frame_to_color_image(&frame);
-            match &mut self.texture {
-                Some(tex) => tex.set(img, TextureOptions::LINEAR),
-                None => {
-                    self.texture =
-                        Some(ctx.load_texture("video_frame", img, TextureOptions::LINEAR));
+            self.color = Some(frame.color);
+            // Upload the two YUV planes as GPU textures (R8/R8G8 for 8-bit NV12,
+            // R16/R16G16 for 10-bit P010). The previous frame's textures are freed
+            // when these assignments drop them.
+            let (y, uv) = match frame.depth {
+                FrameDepth::Eight => (
+                    renderer.upload_r8(frame.width, frame.height, &frame.y_plane),
+                    renderer.upload_r8g8(frame.chroma_width, frame.chroma_height, &frame.uv_plane),
+                ),
+                FrameDepth::Ten => (
+                    renderer.upload_r16(frame.width, frame.height, &frame.y_plane),
+                    renderer.upload_r16g16(frame.chroma_width, frame.chroma_height, &frame.uv_plane),
+                ),
+            };
+            match (y, uv) {
+                (Ok(y), Ok(uv)) => {
+                    self.y_tex = Some(y);
+                    self.uv_tex = Some(uv);
+                }
+                (e1, e2) => {
+                    if let Err(e) = e1 {
+                        log::warn!("Failed to upload video luma plane: {e}");
+                    }
+                    if let Err(e) = e2 {
+                        log::warn!("Failed to upload video chroma plane: {e}");
+                    }
                 }
             }
         }
@@ -183,8 +248,16 @@ impl VideoState {
             .and_then(|i| self.subtitles.cue_at(i, clock));
     }
 
-    pub fn texture(&self) -> Option<&TextureHandle> {
-        self.texture.as_ref()
+    /// The current frame's (luma, chroma) plane textures, ready to draw via
+    /// `Renderer::draw_video`. `None` until the first frame is decoded.
+    pub fn planes(&self) -> Option<(&GpuTexture, &GpuTexture)> {
+        Some((self.y_tex.as_ref()?, self.uv_tex.as_ref()?))
+    }
+
+    /// Colour description of the current frame (drives the video shader's colour
+    /// pipeline). `None` until the first frame is decoded.
+    pub fn video_color(&self) -> Option<ColorInfo> {
+        self.color
     }
 
     /// Current playback position in seconds (the smoothed master clock).
@@ -216,8 +289,22 @@ impl VideoState {
             .map(|(s, _)| s.as_str())
     }
 
+    /// Whether the seek bar / time HUD should currently be drawn. True for a few
+    /// seconds after the last interaction (seek, pause/resume, track change).
+    pub fn controls_visible(&self) -> bool {
+        self.controls_shown_at.elapsed() < CONTROLS_DURATION
+    }
+
+    /// Re-show the controls (e.g. while the user is dragging the seek-bar marker).
+    pub fn bump_controls(&mut self) {
+        self.controls_shown_at = Instant::now();
+    }
+
     fn set_osd(&mut self, text: String) {
         self.osd = Some((text, Instant::now()));
+        // Any action that surfaces an OSD message is an interaction, so re-show
+        // the seek bar / time HUD alongside it.
+        self.controls_shown_at = Instant::now();
     }
 
     pub fn toggle_pause(&mut self) {
@@ -237,31 +324,75 @@ impl VideoState {
         self.set_osd(msg.to_string());
     }
 
-    pub fn seek_relative(&mut self, delta_secs: f64) {
+    /// Enter the post-seek hold: freeze the master clock at `target` and pause
+    /// audio so neither runs ahead of the picture while the decoder catches up.
+    fn begin_resync(&mut self, target: f64) {
+        self.resyncing = true;
+        self.resync_target = target;
+        self.resync_started = Instant::now();
+        self.smooth_clock_secs = target;
+        self.clock_initialized = true;
+        if self.use_audio_clock && !self.paused {
+            if let Some(a) = &self.audio {
+                a.set_sink_paused(true);
+            }
+        }
+    }
+
+    /// Release the post-seek hold: resume audio (or re-anchor the wall clock) and
+    /// hard-resync the smoothed clock to the now-current raw clock.
+    fn finish_resync(&mut self) {
+        self.resyncing = false;
+        if self.use_audio_clock {
+            if !self.paused {
+                if let Some(a) = &self.audio {
+                    a.set_sink_paused(false);
+                }
+            }
+        } else {
+            self.wall_base_secs = self.resync_target;
+            self.wall_started = if self.paused { None } else { Some(Instant::now()) };
+        }
+        self.clock_initialized = false;
+        self.smooth_clock_secs = self.resync_target;
+        self.last_clock_tick = None;
+    }
+
+    /// Current playback position in seconds (raw clock; frozen at the target
+    /// while resyncing). Used as the anchor for relative seeks.
+    fn current_pos_secs(&self) -> f64 {
+        if self.use_audio_clock {
+            self.audio
+                .as_ref()
+                .map(|a| a.position().as_secs_f64())
+                .unwrap_or(0.0)
+        } else {
+            self.raw_clock_secs()
+        }
+    }
+
+    /// Seek to an absolute time (seconds), clamping into range, and enter the
+    /// post-seek hold. Shared by relative seeks and the seek-bar scrub.
+    fn seek_to_absolute(&mut self, target: f64) {
         let max = self
             .duration
             .map(|d| (d.as_secs_f64() - 0.2).max(0.0))
             .unwrap_or(f64::MAX);
+        let target = target.clamp(0.0, max);
 
+        self.stream.seek(Duration::from_secs_f64(target));
         if self.use_audio_clock {
-            let pos = self
-                .audio
-                .as_ref()
-                .map(|a| a.position().as_secs_f64())
-                .unwrap_or(0.0);
-            let target = (pos + delta_secs).clamp(0.0, max);
-            self.stream.seek(Duration::from_secs_f64(target));
             if let Some(a) = self.audio.as_mut() {
-                let _ = a.seek_relative(delta_secs, self.duration);
-            }
-        } else {
-            let target = (self.raw_clock_secs() + delta_secs).clamp(0.0, max);
-            self.stream.seek(Duration::from_secs_f64(target));
-            self.wall_base_secs = target;
-            if self.wall_started.is_some() {
-                self.wall_started = Some(Instant::now());
+                let _ = a.seek_to_secs(target);
             }
         }
+        // Hold the clock + audio at the target until the decoder produces the
+        // target frame, then both resume together (see begin/finish_resync).
+        self.begin_resync(target);
+    }
+
+    pub fn seek_relative(&mut self, delta_secs: f64) {
+        self.seek_to_absolute(self.current_pos_secs() + delta_secs);
 
         let sign = if delta_secs < 0.0 { "\u{2212}" } else { "+" };
         let mag = delta_secs.abs() as i64;
@@ -271,6 +402,15 @@ impl VideoState {
             format!("{mag}s")
         };
         self.set_osd(format!("{sign}{label}"));
+    }
+
+    /// Seek to a fraction (0..1) of the duration — used by the seek-bar marker.
+    pub fn seek_to_fraction(&mut self, frac: f64) {
+        let Some(d) = self.duration else { return };
+        let target = frac.clamp(0.0, 1.0) * d.as_secs_f64();
+        self.seek_to_absolute(target);
+        let s = target as i64;
+        self.set_osd(format!("{}:{:02}", s / 60, s % 60));
     }
 
     pub fn cycle_audio_track(&mut self) {

@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use eframe::egui;
-use std::{env, error::Error, path::PathBuf};
+use std::{env, error::Error, path::PathBuf, time::Duration};
 
 mod app;
 mod audio;
@@ -9,6 +8,8 @@ mod cache;
 mod config;
 mod decode;
 mod formats;
+mod geom;
+mod gpu;
 mod subtitles;
 mod thumbnail;
 mod types;
@@ -19,6 +20,7 @@ mod workers;
 use crate::app::ImageViewerApp;
 use crate::cache::clear_old_preload_cache;
 use crate::decode::get_absolute_path;
+use crate::gpu::Renderer;
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -76,19 +78,42 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let initial_path: PathBuf = get_absolute_path(image_file_arg)?;
 
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_min_inner_size([300.0, 200.0])
-	    .with_app_id("lightningview"),
-        ..Default::default()
-    };
+    // Set the Wayland/X11 application id (window class) before video init.
+    sdl3::hint::set("SDL_APP_ID", "lightningview");
 
-    eframe::run_native(
-        "Lightning View (egui)",
-        native_options,
-        Box::new(|cc| Ok(Box::new(ImageViewerApp::new(cc, Some(initial_path), is_fullscreen)))),
-    )?;
+    let sdl = sdl3::init()?;
+    let video = sdl.video()?;
+    let mut renderer = Renderer::new(&video, "Lightning View", 1280, 720, is_fullscreen)?;
 
+    let mut app = ImageViewerApp::new(Some(initial_path), is_fullscreen, &renderer);
+
+    let mut event_pump = sdl.event_pump()?;
+    'running: loop {
+        // When the app has work to do (video playing, animation, momentum, a
+        // pending decode, an open dialog) we poll without blocking and let vsync
+        // pace the loop. When idle we block on a timed wait to avoid spinning the
+        // CPU — a freshly-decoded image still appears within the timeout.
+        if app.is_active() {
+            for event in event_pump.poll_iter() {
+                app.handle_event(&event, &mut renderer);
+            }
+        } else if let Some(event) = event_pump.wait_event_timeout(Duration::from_millis(100)) {
+            app.handle_event(&event, &mut renderer);
+            for event in event_pump.poll_iter() {
+                app.handle_event(&event, &mut renderer);
+            }
+        }
+
+        if app.quit_requested() {
+            break 'running;
+        }
+
+        app.update(&mut renderer);
+        if let Err(e) = app.render(&mut renderer) {
+            log::error!("render error: {e}");
+        }
+    }
+
+    app.shutdown();
     Ok(())
 }

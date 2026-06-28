@@ -579,19 +579,23 @@ impl AudioPlayer {
         }
     }
 
-    pub fn seek_relative(&mut self, delta_secs: f64, total: Option<Duration>) -> Result<()> {
+    /// Pause/resume the sink directly (independent of the user's play/pause
+    /// state). Used to hold audio still while the video catches up after a seek,
+    /// so the master clock can't run ahead of the decoded picture.
+    pub fn set_sink_paused(&self, paused: bool) {
+        if paused {
+            self.player.pause();
+        } else {
+            self.player.play();
+        }
+    }
+
+    /// Seek to an absolute position (seconds), re-decoding from there.
+    pub fn seek_to_secs(&mut self, target_secs: f64) -> Result<()> {
         let Some(path) = self.current_path.clone() else {
             return Ok(());
         };
-        let cur = self.tap.position().as_secs_f64();
-        let mut target_secs = (cur + delta_secs).max(0.0);
-        if let Some(t) = total {
-            let max = t.as_secs_f64();
-            if max > 0.0 && target_secs > max - 0.05 {
-                target_secs = (max - 0.05).max(0.0);
-            }
-        }
-        self.seek_to(&path, Duration::from_secs_f64(target_secs))
+        self.seek_to(&path, Duration::from_secs_f64(target_secs.max(0.0)))
     }
 
     pub fn position(&self) -> Duration {

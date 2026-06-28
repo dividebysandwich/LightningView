@@ -1,28 +1,40 @@
 // --- Main Application State ---
-use eframe::egui;
-use egui::{epaint::RectShape, Color32, ColorImage, Pos2, Rect, Shape, Vec2};
+//
+// Owns all viewer/player state and drives it from the SDL3 main loop via three
+// entry points: `handle_event` (input), `update` (per-frame state advance), and
+// `render` (draw). Rendering goes through the SDL_GPU `Renderer`; there is no
+// egui involvement.
+
 use arboard::{Clipboard, ImageData};
+use sdl3::event::Event;
+use sdl3::keyboard::{Keycode, Mod};
+use sdl3::mouse::MouseButton;
 use std::{
     borrow::Cow,
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::Ordering},
+    sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
 
 use crate::cache::{load_preload_cache, preload_cache_path};
 use crate::config::KeyBindings;
-use crate::decode::{downscale_color_image, is_video_file, scan_supported_images, to_egui_color_image};
+use crate::decode::{downscale_pixel_buf, is_video_file, scan_supported_images, to_pixel_buf};
+use crate::geom::{Rect, Vec2};
+use crate::gpu::{gray, rgba8, Renderer, TextAlign, VideoColorParams, WHITE};
 use crate::thumbnail::load_embedded_thumbnail;
-use crate::video_state::VideoState;
 use crate::types::{
     Animation, AnimationFrame, DisplayableImage, FullResRequest, FullResWorker, LoadedImage,
-    MemoryGate, PreloadState,
+    MemoryGate, PixelBuf, PreloadState,
 };
+use crate::video_state::VideoState;
 use crate::workers::{spawn_full_res_worker, spawn_preload_workers};
 
 const TILE_SIZE: usize = 1024; // Use tiles of 1024x1024 pixels for the detail view
+/// Largest single texture we upload; bigger images are tiled. A conservative
+/// value that every GPU supports (real limits are higher, just more tiling).
+const MAX_TEXTURE_SIDE: usize = 2048;
 /// Maximum time we wait for a full-res decode before assuming the worker is stuck
 /// (slow/hung decoder, bad file). After this we respawn the worker and unblock
 /// the bulk preload so the app doesn't sit there silently forever.
@@ -42,25 +54,8 @@ fn fit_centered(content: Vec2, area: Rect) -> Rect {
     } else {
         size.x = size.y * aspect;
     }
-    let offset = (area.size() - size) / 2.0;
+    let offset = (area.size() - size) * 0.5;
     Rect::from_min_size(area.min + offset, size)
-}
-
-/// Draw a subtitle line centered near the bottom of `area`, with a black
-/// outline so it stays legible over any frame.
-fn draw_subtitle(painter: &egui::Painter, area: Rect, text: &str) {
-    let font = egui::FontId::proportional((area.height() * 0.045).clamp(18.0, 40.0));
-    let anchor = egui::Align2::CENTER_BOTTOM;
-    let pos = Pos2::new(area.center().x, area.max.y - area.height() * 0.05);
-    for off in [
-        Vec2::new(-1.5, 0.0),
-        Vec2::new(1.5, 0.0),
-        Vec2::new(0.0, -1.5),
-        Vec2::new(0.0, 1.5),
-    ] {
-        painter.text(pos + off, anchor, text, font.clone(), Color32::BLACK);
-    }
-    painter.text(pos, anchor, text, font, Color32::WHITE);
 }
 
 /// Format a duration in seconds as `M:SS` (or `H:MM:SS` past an hour).
@@ -76,68 +71,156 @@ fn format_time(secs: f64) -> String {
     }
 }
 
-/// Draw a graphical seek/progress bar near the bottom of `area`, with the
-/// current position and total duration. Falls back to a bare elapsed-time label
-/// when the duration is unknown (no meaningful fraction to fill).
-fn draw_seek_bar(painter: &egui::Painter, area: Rect, pos_secs: f64, dur_secs: Option<f64>) {
-    let margin = (area.width() * 0.05).clamp(16.0, 120.0);
-    let left = area.min.x + margin;
-    let right = area.max.x - margin;
-    if right <= left {
-        return;
-    }
-    let track_y = area.max.y - 28.0;
-    let track_h = 6.0;
-
-    let font = egui::FontId::proportional(14.0);
-    let label = match dur_secs {
-        Some(d) => format!("{} / {}", format_time(pos_secs), format_time(d)),
-        None => format_time(pos_secs),
-    };
-    // Time label sits just above the track, right-aligned to the track end.
-    painter.text(
-        Pos2::new(right, track_y - track_h - 4.0),
-        egui::Align2::RIGHT_BOTTOM,
-        &label,
-        font,
-        Color32::WHITE,
-    );
-
-    let Some(dur) = dur_secs.filter(|d| *d > 0.0) else {
-        return;
-    };
-    let frac = (pos_secs / dur).clamp(0.0, 1.0) as f32;
-    let track = Rect::from_min_max(
-        Pos2::new(left, track_y),
-        Pos2::new(right, track_y + track_h),
-    );
-    let radius = track_h / 2.0;
-    // Background track, then the elapsed fill, then a playhead knob.
-    painter.rect_filled(track, radius, Color32::from_black_alpha(160));
-    let fill_x = left + (right - left) * frac;
-    let fill = Rect::from_min_max(Pos2::new(left, track_y), Pos2::new(fill_x, track_y + track_h));
-    painter.rect_filled(fill, radius, Color32::from_rgb(230, 230, 230));
-    painter.circle_filled(
-        Pos2::new(fill_x, track_y + track_h / 2.0),
-        track_h,
-        Color32::WHITE,
-    );
+/// Draw a subtitle line centered near the bottom of `area`, with a black
+/// outline so it stays legible over any frame.
+fn draw_subtitle(r: &mut Renderer, area: Rect, text: &str) {
+    let size = (area.height() * 0.045).clamp(18.0, 40.0);
+    let pos = Vec2::new(area.center().x, area.max().y - area.height() * 0.05 - size);
+    r.draw_text_outlined(text, size, pos, TextAlign::Center, WHITE);
 }
 
 /// Draw a transient on-screen status message in the top-left of `area`.
-fn draw_osd(painter: &egui::Painter, area: Rect, text: &str) {
-    let font = egui::FontId::proportional(18.0);
+fn draw_osd(r: &mut Renderer, area: Rect, text: &str) {
+    let size = 18.0;
     let pos = area.min + Vec2::new(16.0, 16.0);
-    let galley = painter.layout_no_wrap(text.to_string(), font, Color32::WHITE);
-    let bg = Rect::from_min_size(pos, galley.size()).expand(6.0);
-    painter.rect_filled(bg, 4.0, Color32::from_black_alpha(160));
-    painter.galley(pos, galley, Color32::WHITE);
+    let ts = r.text_size(text, size);
+    let bg = Rect::from_min_size(pos - Vec2::new(6.0, 6.0), ts + Vec2::new(12.0, 12.0));
+    r.fill_rect(bg, rgba8(0, 0, 0, 160));
+    r.draw_text(text, size, pos, TextAlign::Left, WHITE);
+}
+
+/// Draw a graphical seek/progress bar near the bottom of `area`, with the
+/// current position and total duration.
+/// Geometry of the seek bar within `area`, shared by drawing and mouse hit-testing.
+struct SeekBarGeom {
+    left: f32,
+    right: f32,
+    track_y: f32,
+    track_h: f32,
+    /// Generous clickable band around the thin track.
+    hit: Rect,
+}
+
+fn seek_bar_geom(area: Rect) -> Option<SeekBarGeom> {
+    let margin = (area.width() * 0.05).clamp(16.0, 120.0);
+    let left = area.min.x + margin;
+    let right = area.max().x - margin;
+    if right <= left {
+        return None;
+    }
+    let track_y = area.max().y - 28.0;
+    let track_h = 6.0;
+    let hit = Rect::from_min_max(
+        Vec2::new(left - 8.0, track_y - 12.0),
+        Vec2::new(right + 8.0, track_y + track_h + 14.0),
+    );
+    Some(SeekBarGeom { left, right, track_y, track_h, hit })
+}
+
+/// Fraction (0..1) along the seek bar for a given screen x.
+fn seek_bar_frac_at(g: &SeekBarGeom, x: f32) -> f32 {
+    ((x - g.left) / (g.right - g.left)).clamp(0.0, 1.0)
+}
+
+/// Draw the seek/progress bar. While the user is scrubbing, `scrub_frac` overrides
+/// the marker position (a live preview) and the time label shows the scrub target.
+fn draw_seek_bar(
+    r: &mut Renderer,
+    area: Rect,
+    pos_secs: f64,
+    dur_secs: Option<f64>,
+    scrub_frac: Option<f32>,
+) {
+    let Some(g) = seek_bar_geom(area) else {
+        return;
+    };
+
+    // The fraction (and time) we display: the scrub target if dragging, else the
+    // live playback position.
+    let display_secs = match (scrub_frac, dur_secs) {
+        (Some(f), Some(d)) => f as f64 * d,
+        _ => pos_secs,
+    };
+    let label = match dur_secs {
+        Some(d) => format!("{} / {}", format_time(display_secs), format_time(d)),
+        None => format_time(display_secs),
+    };
+    r.draw_text(
+        &label,
+        14.0,
+        Vec2::new(g.right, g.track_y - g.track_h - 18.0),
+        TextAlign::Right,
+        WHITE,
+    );
+
+    let frac = match scrub_frac {
+        Some(f) => f,
+        None => match dur_secs.filter(|d| *d > 0.0) {
+            Some(d) => (pos_secs / d).clamp(0.0, 1.0) as f32,
+            None => return, // unknown duration and not scrubbing: label only
+        },
+    };
+
+    // Background track, elapsed fill, then a playhead knob.
+    r.fill_rect(Rect::xywh(g.left, g.track_y, g.right - g.left, g.track_h), rgba8(0, 0, 0, 160));
+    let fill_w = (g.right - g.left) * frac;
+    r.fill_rect(Rect::xywh(g.left, g.track_y, fill_w, g.track_h), gray(230));
+    // The knob grows a little while scrubbing so it's easy to see where you'll land.
+    let knob = if scrub_frac.is_some() { g.track_h * 3.0 } else { g.track_h * 2.0 };
+    r.fill_rect(
+        Rect::xywh(g.left + fill_w - knob / 2.0, g.track_y + g.track_h / 2.0 - knob / 2.0, knob, knob),
+        WHITE,
+    );
+}
+
+// Context-menu geometry.
+const MENU_W: f32 = 240.0;
+const MENU_ROW_H: f32 = 30.0;
+const MENU_PAD: f32 = 5.0;
+const MENU_ITEMS: usize = 3;
+
+/// Compute the context-menu panel rect and its per-row rects, clamped so the
+/// menu stays fully on-screen. Shared by `handle_event` (hit-testing) and
+/// `render` (drawing) so the two never disagree.
+fn context_menu_layout(anchor: Vec2, area: Rect) -> (Rect, [Rect; MENU_ITEMS]) {
+    let h = MENU_ROW_H * MENU_ITEMS as f32 + MENU_PAD * 2.0;
+    let x = anchor.x.min(area.max().x - MENU_W).max(area.min.x);
+    let y = anchor.y.min(area.max().y - h).max(area.min.y);
+    let panel = Rect::xywh(x, y, MENU_W, h);
+    let mut rows = [Rect::xywh(0.0, 0.0, 0.0, 0.0); MENU_ITEMS];
+    for (i, row) in rows.iter_mut().enumerate() {
+        *row = Rect::xywh(
+            x + MENU_PAD,
+            y + MENU_PAD + i as f32 * MENU_ROW_H,
+            MENU_W - MENU_PAD * 2.0,
+            MENU_ROW_H,
+        );
+    }
+    (panel, rows)
+}
+
+/// Compute the delete-dialog panel and its (Cancel, Delete) button rects.
+fn delete_dialog_layout(area: Rect) -> (Rect, Rect, Rect) {
+    let panel_w = (area.width() * 0.6).clamp(320.0, 720.0);
+    let panel_h = 150.0;
+    let panel = Rect::xywh(
+        area.center().x - panel_w / 2.0,
+        area.center().y - panel_h / 2.0,
+        panel_w,
+        panel_h,
+    );
+    let btn_w = 130.0;
+    let btn_h = 36.0;
+    let by = panel.max().y - btn_h - 18.0;
+    let gap = 24.0;
+    let cancel = Rect::xywh(panel.center().x - btn_w - gap / 2.0, by, btn_w, btn_h);
+    let delete = Rect::xywh(panel.center().x + gap / 2.0, by, btn_w, btn_h);
+    (panel, cancel, delete)
 }
 
 pub struct ImageViewerApp {
     image: Option<DisplayableImage>,
-    /// Active video playback state. Mutually exclusive with `image`: when a
-    /// video is loaded `image` is `None`, and vice versa.
+    /// Active video playback state. Mutually exclusive with `image`.
     video: Option<VideoState>,
     image_files: Vec<PathBuf>,
     current_index: usize,
@@ -158,12 +241,26 @@ pub struct ImageViewerApp {
     memory_gate: Arc<MemoryGate>,
     /// Configurable key bindings for video seeking and file browsing.
     keybindings: KeyBindings,
+
+    // --- input state (event-driven) ---
+    mouse_pos: Vec2,
+    dragging: bool,
+    /// Set when a drag/zoom happened this frame; suppresses the bounce physics
+    /// for that frame (mirrors the old `is_interacting`).
+    interacted: bool,
+    /// When `Some`, the right-click context menu is open, anchored at this point.
+    context_menu: Option<Vec2>,
+    /// True while dragging the seek-bar marker; `scrub_frac` is the live target
+    /// fraction, committed as a seek on mouse-up.
+    scrubbing: bool,
+    scrub_frac: f32,
+    should_quit: bool,
 }
 
 impl ImageViewerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, initial_fullscreen: bool) -> Self {
+    pub fn new(path: Option<PathBuf>, initial_fullscreen: bool, renderer: &Renderer) -> Self {
         let memory_gate = Arc::new(MemoryGate::new());
-        let full_res_worker = Some(spawn_full_res_worker(cc.egui_ctx.clone(), memory_gate.clone()));
+        let full_res_worker = Some(spawn_full_res_worker(memory_gate.clone()));
         let keybindings = crate::config::Config::load().keybindings;
         let mut app = Self {
             image: None,
@@ -186,14 +283,24 @@ impl ImageViewerApp {
             preload_state: None,
             memory_gate,
             keybindings,
+            mouse_pos: Vec2::ZERO,
+            dragging: false,
+            interacted: false,
+            context_menu: None,
+            scrubbing: false,
+            scrub_frac: 0.0,
+            should_quit: false,
         };
         if let Some(path) = path {
             app.gather_images_from_directory(&path);
             if !app.image_files.is_empty() {
-                app.load_image_at_index(app.current_index, &cc.egui_ctx);
+                app.load_image_at_index(app.current_index, renderer);
                 app.start_bulk_preload();
             } else {
-                app.last_error = Some(format!("No supported images found in directory of '{}'", path.display()));
+                app.last_error = Some(format!(
+                    "No supported images found in directory of '{}'",
+                    path.display()
+                ));
             }
         } else {
             app.last_error = Some("No image file specified.".to_string());
@@ -201,7 +308,7 @@ impl ImageViewerApp {
         app
     }
 
-    fn load_image_at_index(&mut self, index: usize, ctx: &egui::Context) {
+    fn load_image_at_index(&mut self, index: usize, renderer: &Renderer) {
         self.current_index = index;
         let path = self.image_files[self.image_order[self.current_index]].clone();
         log::info!("Loading image: {}", path.display());
@@ -212,22 +319,20 @@ impl ImageViewerApp {
         self.full_res_pending = false;
         self.full_res_pending_since = None;
 
-        // Video files bypass the image decode/cache/tile pipeline entirely and
-        // are handed to the ffmpeg-backed player. Tear down any previous video
-        // first so its decode thread and audio stop deterministically.
+        // Video files bypass the image decode/cache/tile pipeline entirely.
         if is_video_file(&path) {
             self.video = None;
             self.image = None;
-            match VideoState::open(&path, ctx) {
+            match VideoState::open(&path) {
                 Ok(state) => {
                     self.video = Some(state);
                     self.last_error = None;
                 }
                 Err(e) => {
-                    self.last_error = Some(format!("Failed to open video '{}': {e}", path.display()));
+                    self.last_error =
+                        Some(format!("Failed to open video '{}': {e}", path.display()));
                 }
             }
-            ctx.request_repaint();
             return;
         }
 
@@ -235,41 +340,47 @@ impl ImageViewerApp {
         self.video = None;
 
         if let Some(LoadedImage::Static(preview)) = load_preload_cache(&path) {
-            log::info!("Loaded preload-cache preview for '{}' in {:.2?}", path.display(), start_time.elapsed());
-            self.display_loaded_image(preview, &path, ctx);
-            self.start_full_res_load(path, ctx);
+            log::info!(
+                "Loaded preload-cache preview for '{}' in {:.2?}",
+                path.display(),
+                start_time.elapsed()
+            );
+            self.display_loaded_image(preview, renderer);
+            self.start_full_res_load(path, renderer);
         } else if let Some(thumb) = load_embedded_thumbnail(&path) {
-            log::info!("Loaded embedded thumbnail for '{}' in {:.2?}", path.display(), start_time.elapsed());
-            self.display_loaded_image(to_egui_color_image(thumb), &path, ctx);
-            self.start_full_res_load(path, ctx);
+            log::info!(
+                "Loaded embedded thumbnail for '{}' in {:.2?}",
+                path.display(),
+                start_time.elapsed()
+            );
+            self.display_loaded_image(to_pixel_buf(thumb), renderer);
+            self.start_full_res_load(path, renderer);
         } else {
-            // No preview available. Route the decode through the worker so the UI
-            // thread stays responsive and the user can keep navigating; the central
-            // panel will render a "Loading…" placeholder until the reply arrives.
+            // No preview available; route the decode through the worker and show a
+            // "Loading…" placeholder until the reply arrives.
             self.image = None;
             self.last_error = None;
-            self.start_full_res_load(path, ctx);
+            self.start_full_res_load(path, renderer);
         }
-        ctx.request_repaint();
     }
 
-    fn display_loaded_image(&mut self, image: ColorImage, path: &Path, ctx: &egui::Context) {
-        let max_texture_side = 2048; // TODO: Detect limit
-        let needs_tiling = image.width() > max_texture_side || image.height() > max_texture_side;
+    fn display_loaded_image(&mut self, image: PixelBuf, renderer: &Renderer) {
+        let needs_tiling =
+            image.width() > MAX_TEXTURE_SIDE || image.height() > MAX_TEXTURE_SIDE;
 
         let preview_image = if needs_tiling {
-            // Downscale reads the buffer by reference now, so we no longer clone
-            // the full-resolution image (~96MB for a 24MP photo) just to feed it.
-            downscale_color_image(&image, max_texture_side)
+            downscale_pixel_buf(&image, MAX_TEXTURE_SIDE)
         } else {
             image.clone()
         };
 
-        let preview_texture = ctx.load_texture(
-            format!("{}_preview", path.display()),
-            preview_image,
-            Default::default(),
-        );
+        let preview_texture = match renderer.upload_texture(&preview_image) {
+            Ok(t) => t,
+            Err(e) => {
+                self.last_error = Some(format!("Failed to upload image: {e}"));
+                return;
+            }
+        };
 
         self.image = Some(DisplayableImage {
             full_res_image: image,
@@ -278,22 +389,18 @@ impl ImageViewerApp {
             needs_tiling,
             animation: None,
         });
-
         self.last_error = None;
     }
 
-    /// Install an animated image for playback. Animated frames always render via
-    /// the simple (non-tiled) preview path: each tick the UI swaps `preview_texture`
-    /// for the active frame, so we never tile them. The first frame is shown
-    /// immediately and `full_res_image` tracks the displayed frame (used for sizing
-    /// and clipboard copies).
-    fn display_animated_image(&mut self, frames: Vec<AnimationFrame>, path: &Path, ctx: &egui::Context) {
+    fn display_animated_image(&mut self, frames: Vec<AnimationFrame>, renderer: &Renderer) {
         let first_frame = frames[0].image.clone();
-        let preview_texture = ctx.load_texture(
-            format!("{}_anim", path.display()),
-            first_frame.clone(),
-            Default::default(),
-        );
+        let preview_texture = match renderer.upload_texture(&first_frame) {
+            Ok(t) => t,
+            Err(e) => {
+                self.last_error = Some(format!("Failed to upload image: {e}"));
+                return;
+            }
+        };
 
         self.image = Some(DisplayableImage {
             full_res_image: first_frame,
@@ -306,13 +413,10 @@ impl ImageViewerApp {
                 frame_started: Instant::now(),
             }),
         });
-
         self.last_error = None;
     }
 
-    fn start_full_res_load(&mut self, path: PathBuf, ctx: &egui::Context) {
-        // Starve bulk preload of CPU while the foreground decode is pending — the
-        // user's currently-viewed image takes priority over speculative cache fills.
+    fn start_full_res_load(&mut self, path: PathBuf, _renderer: &Renderer) {
         if let Some(state) = &self.preload_state {
             state.pause.store(true, Ordering::Relaxed);
         }
@@ -322,27 +426,22 @@ impl ImageViewerApp {
             .map(|i| i.full_res_image.width() as u32)
             .unwrap_or(0);
         let request = FullResRequest { path: path.clone(), preview_width };
-        let send_result = self
-            .full_res_worker
-            .as_ref()
-            .map(|w| w.tx.send(request));
-        // If the worker channel is gone (e.g. it panicked out of catch_unwind), respawn it
-        // so subsequent navigations still get full-res loads.
+        let send_result = self.full_res_worker.as_ref().map(|w| w.tx.send(request));
+        // If the worker channel is gone (e.g. it panicked out of catch_unwind),
+        // respawn it so subsequent navigations still get full-res loads.
         if !matches!(send_result, Some(Ok(()))) {
             log::warn!("Full-res worker unavailable; respawning.");
-            let worker = spawn_full_res_worker(ctx.clone(), self.memory_gate.clone());
-            let _ = worker.tx.send(FullResRequest { path: path.clone(), preview_width });
+            let worker = spawn_full_res_worker(self.memory_gate.clone());
+            let _ = worker.tx.send(FullResRequest { path, preview_width });
             self.full_res_worker = Some(worker);
         }
         self.full_res_pending = true;
         self.full_res_pending_since = Some(Instant::now());
-        // Ensure the watchdog gets a chance to run even if the UI stays idle.
-        ctx.request_repaint_after(FULL_RES_WATCHDOG);
     }
 
-    fn check_pending_load(&mut self, ctx: &egui::Context) {
-        // Watchdog: if a full-res decode hasn't returned for too long, the worker is
-        // likely stuck on a slow/bad file. Drop it so the next nav respawns a fresh one.
+    fn check_pending_load(&mut self, renderer: &Renderer) {
+        // Watchdog: if a full-res decode hasn't returned for too long, the worker
+        // is likely stuck on a slow/bad file. Drop it so the next nav respawns one.
         if self.full_res_pending {
             if let Some(since) = self.full_res_pending_since {
                 if since.elapsed() > FULL_RES_WATCHDOG {
@@ -361,13 +460,11 @@ impl ImageViewerApp {
         }
 
         let Some(worker) = self.full_res_worker.as_ref() else { return };
-        // Drain all available replies, skipping stale ones (path doesn't match current).
         loop {
             let reply = match worker.rx.try_recv() {
                 Ok(r) => r,
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Worker died; reset so the next nav respawns it.
                     self.full_res_worker = None;
                     self.full_res_pending = false;
                     self.full_res_pending_since = None;
@@ -387,8 +484,6 @@ impl ImageViewerApp {
                 continue;
             }
 
-            // A preview reply is just a fast first paint — keep waiting for the
-            // sharp full-res decode that follows it, and leave bulk preload paused.
             if !reply.is_preview {
                 self.full_res_pending = false;
                 self.full_res_pending_since = None;
@@ -406,24 +501,29 @@ impl ImageViewerApp {
                     };
                     let preview_width = reply.preview_width as f32;
                     if preview_width > 0.0 && new_width > 0.0 && !self.is_scaled_to_fit {
-                        // Preserve the user's current view: the displayed size of the image
-                        // (full_res_size * zoom) should stay the same across the swap.
+                        // Preserve the user's current view across the preview→full swap.
                         self.zoom *= preview_width / new_width;
                     }
                     match loaded {
-                        LoadedImage::Static(full_res) => self.display_loaded_image(full_res, &reply.path, ctx),
-                        LoadedImage::Animated(frames) => self.display_animated_image(frames, &reply.path, ctx),
+                        LoadedImage::Static(full_res) => {
+                            self.display_loaded_image(full_res, renderer)
+                        }
+                        LoadedImage::Animated(frames) => {
+                            self.display_animated_image(frames, renderer)
+                        }
                     }
                     if reply.is_preview {
                         log::info!("Showed fast preview for: {}", reply.path.display());
                     } else {
                         log::info!("Swapped in full-res image: {}", reply.path.display());
                     }
-                    ctx.request_repaint();
                 }
                 Err(e) => {
-                    log::error!("Background full-res load failed for {}: {}", reply.path.display(), e);
-                    // If there was no preview to fall back on, surface the error.
+                    log::error!(
+                        "Background full-res load failed for {}: {}",
+                        reply.path.display(),
+                        e
+                    );
                     if self.image.is_none() {
                         self.last_error = Some(e);
                     }
@@ -434,7 +534,6 @@ impl ImageViewerApp {
     }
 
     fn start_bulk_preload(&mut self) {
-        // Shut down any prior worker so we don't have two running.
         if let Some(state) = self.preload_state.take() {
             state.shutdown.store(true, Ordering::Relaxed);
         }
@@ -442,9 +541,8 @@ impl ImageViewerApp {
         if n <= 1 {
             return;
         }
-        // Bounce outward from current_index: +1, -1, +2, -2, ... so images closest to the
-        // user — in either direction — are preloaded first. A purely forward walk leaves
-        // backward navigation hitting un-preloaded images until the queue wraps around.
+        // Bounce outward from current_index so images closest to the user — in
+        // either direction — are preloaded first.
         let mut paths: Vec<PathBuf> = Vec::with_capacity(n - 1);
         let mut seen = vec![false; n];
         seen[self.current_index] = true;
@@ -455,7 +553,9 @@ impl ImageViewerApp {
                 seen[fwd] = true;
                 paths.push(self.image_files[self.image_order[fwd]].clone());
             }
-            if paths.len() >= n - 1 { break; }
+            if paths.len() >= n - 1 {
+                break;
+            }
             let back = (self.current_index + n - d) % n;
             if !seen[back] {
                 seen[back] = true;
@@ -465,8 +565,6 @@ impl ImageViewerApp {
         }
         let state = Arc::new(PreloadState {
             shutdown: std::sync::atomic::AtomicBool::new(false),
-            // Mirror current foreground state so a brand-new preload pool doesn't
-            // immediately race the in-flight decode it should be yielding to.
             pause: std::sync::atomic::AtomicBool::new(self.full_res_pending),
             gate: self.memory_gate.clone(),
         });
@@ -478,25 +576,16 @@ impl ImageViewerApp {
         if let Some(state) = &self.preload_state {
             state.shutdown.store(true, Ordering::Relaxed);
         }
-        // Dropping the worker drops the request Sender, which causes the worker
-        // thread's recv() to fail and exit.
         self.full_res_worker = None;
     }
 
     fn copy_to_clipboard(&mut self) {
         if let (Some(clipboard), Some(image)) = (&mut self.clipboard, &self.image) {
             let image = &image.full_res_image;
-
-            let rgba_bytes: Vec<u8> = image
-                .pixels
-                .iter()
-                .flat_map(|color| color.to_array())
-                .collect();
-
             let image_data = ImageData {
                 width: image.width(),
                 height: image.height(),
-                bytes: Cow::from(rgba_bytes),
+                bytes: Cow::from(image.rgba.clone()),
             };
             log::info!("Copying image: {}x{}", image_data.width, image_data.height);
             if let Err(e) = clipboard.set_image(image_data) {
@@ -515,21 +604,16 @@ impl ImageViewerApp {
                 return;
             }
         };
-
         let files = scan_supported_images(parent_dir);
-
         if let Some(index) = files.iter().position(|p| p == file_path) {
             self.current_index = index;
         }
-
         self.image_files = files;
         self.image_order = (0..self.image_files.len()).collect();
     }
 
     /// Re-scan the parent directory so files added/removed externally show up the
-    /// next time the user navigates. Keeps the currently-viewed image in place,
-    /// preserves random-order traversal, and only restarts bulk preload if the
-    /// listing actually changed (so this is cheap to call on every navigation).
+    /// next time the user navigates.
     fn refresh_directory(&mut self) {
         let parent_dir = match self
             .image_files
@@ -559,8 +643,6 @@ impl ImageViewerApp {
             .cloned();
 
         if self.is_randomized {
-            // Preserve the user's random traversal order: walk the old order, drop
-            // entries whose path no longer exists, then append any new files.
             let old_path_order: Vec<PathBuf> = self
                 .image_order
                 .iter()
@@ -588,8 +670,6 @@ impl ImageViewerApp {
 
         self.image_files = new_files;
 
-        // Restore current_index to point at the same path. If that file was deleted
-        // externally we clamp so the next nav step lands on a valid entry.
         if let Some(cp) = current_path {
             if let Some(file_idx) = self.image_files.iter().position(|p| p == &cp) {
                 if let Some(order_idx) = self.image_order.iter().position(|&i| i == file_idx) {
@@ -600,526 +680,694 @@ impl ImageViewerApp {
             }
         }
 
-        // New files may need preloading; restart the bulk pool with the updated set.
         self.start_bulk_preload();
     }
 
-    fn next_image(&mut self, ctx: &egui::Context) {
+    fn next_image(&mut self, renderer: &Renderer) {
         self.refresh_directory();
         if !self.image_files.is_empty() {
-            self.load_image_at_index((self.current_index + 1) % self.image_files.len(), ctx);
+            self.load_image_at_index((self.current_index + 1) % self.image_files.len(), renderer);
         }
     }
 
-    fn prev_image(&mut self, ctx: &egui::Context) {
+    fn prev_image(&mut self, renderer: &Renderer) {
         self.refresh_directory();
         if !self.image_files.is_empty() {
-            self.load_image_at_index((self.current_index + self.image_files.len() - 1) % self.image_files.len(), ctx);
+            self.load_image_at_index(
+                (self.current_index + self.image_files.len() - 1) % self.image_files.len(),
+                renderer,
+            );
         }
     }
 
-    fn first_image(&mut self, ctx: &egui::Context) {
+    fn first_image(&mut self, renderer: &Renderer) {
         self.refresh_directory();
         if !self.image_files.is_empty() {
-            self.load_image_at_index(0, ctx);
+            self.load_image_at_index(0, renderer);
         }
     }
 
-    fn last_image(&mut self, ctx: &egui::Context) {
+    fn last_image(&mut self, renderer: &Renderer) {
         self.refresh_directory();
         if !self.image_files.is_empty() {
-            self.load_image_at_index(self.image_files.len() - 1, ctx);
+            self.load_image_at_index(self.image_files.len() - 1, renderer);
         }
     }
 
-    fn handle_keyboard_input(&mut self, ctx: &egui::Context) {
-
-        let events = ctx.input(|i| i.events.clone());
-        // Iterate over all events that occurred this frame.
-        for event in &events {
-            // Pattern match to find the `Copy` event.
-            if let egui::Event::Copy = event {
-                log::info!("Copying image to clipboard...");
-                self.copy_to_clipboard();
+    /// Delete the current file (after confirmation) and advance.
+    fn perform_delete(&mut self, renderer: &Renderer) {
+        self.show_delete_confirmation = false;
+        let Some(path) = self.image_files.get(self.image_order[self.current_index]).cloned() else {
+            return;
+        };
+        // Compute the cache path before deleting — the hash needs the file's size/mtime.
+        let cache_path = preload_cache_path(&path);
+        if let Err(e) = fs::remove_file(&path) {
+            self.last_error = Some(format!("Failed to delete file: {}", e));
+            return;
+        }
+        log::info!("Deleted file: {}", path.display());
+        if cache_path.exists() {
+            if let Err(e) = fs::remove_file(&cache_path) {
+                log::warn!("Failed to delete preload cache {}: {}", cache_path.display(), e);
             }
         }
+        let removed_order_index = self.image_order.remove(self.current_index);
+        self.image_files.remove(removed_order_index);
+        for order_idx in self.image_order.iter_mut() {
+            if *order_idx > removed_order_index {
+                *order_idx -= 1;
+            }
+        }
+        if self.image_files.is_empty() {
+            self.should_quit = true;
+        } else {
+            self.current_index %= self.image_files.len();
+            self.load_image_at_index(self.current_index, renderer);
+        }
+    }
 
-        // Navigation keys are configurable (see `config::KeyBindings`). By
-        // default arrows seek within a video and PageUp/PageDown browse files,
-        // and file browsing works regardless of whether a video or image is
-        // shown.
+    /// If the seek bar is currently visible and `p` lands on its clickable band,
+    /// begin scrubbing. Returns whether a scrub started (so the left-click handler
+    /// skips the image-pan path).
+    fn try_start_scrub(&mut self, p: Vec2, area: Rect) -> bool {
+        let visible = self
+            .video
+            .as_ref()
+            .map(|v| v.controls_visible() && v.duration_secs().is_some())
+            .unwrap_or(false);
+        if !visible {
+            return false;
+        }
+        let Some(g) = seek_bar_geom(area) else {
+            return false;
+        };
+        if !g.hit.contains(p) {
+            return false;
+        }
+        self.scrubbing = true;
+        self.scrub_frac = seek_bar_frac_at(&g, p.x);
+        if let Some(v) = &mut self.video {
+            v.bump_controls();
+        }
+        true
+    }
+
+    // --- Event handling ------------------------------------------------------
+
+    pub fn handle_event(&mut self, event: &Event, renderer: &mut Renderer) {
+        match event {
+            Event::Quit { .. } => self.should_quit = true,
+            Event::KeyDown { keycode: Some(kc), keymod, repeat: false, .. } => {
+                self.on_key(*kc, *keymod, renderer);
+            }
+            Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } => {
+                let p = Vec2::new(*x, *y);
+                self.mouse_pos = p;
+                let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
+                if self.show_delete_confirmation {
+                    // Hit-test the dialog buttons; clicks elsewhere keep it open.
+                    let (_, cancel, delete) = delete_dialog_layout(area);
+                    if delete.contains(p) {
+                        self.perform_delete(renderer);
+                    } else if cancel.contains(p) {
+                        self.show_delete_confirmation = false;
+                    }
+                } else if let Some(anchor) = self.context_menu {
+                    // Hit-test the menu rows; a click outside dismisses it.
+                    let (panel, rows) = context_menu_layout(anchor, area);
+                    if rows[0].contains(p) {
+                        self.is_fullscreen = !self.is_fullscreen;
+                        self.context_menu = None;
+                    } else if rows[1].contains(p) {
+                        self.is_scaled_to_fit = !self.is_scaled_to_fit;
+                        self.context_menu = None;
+                    } else if rows[2].contains(p) {
+                        self.toggle_random_order();
+                        self.context_menu = None;
+                    } else if !panel.contains(p) {
+                        self.context_menu = None;
+                    }
+                } else if self.try_start_scrub(p, area) {
+                    // Grabbed the seek-bar marker; scrubbing handled on motion/up.
+                } else {
+                    self.dragging = true;
+                }
+            }
+            Event::MouseButtonDown { mouse_btn: MouseButton::Right, x, y, .. } => {
+                let p = Vec2::new(*x, *y);
+                self.mouse_pos = p;
+                // Open the context menu (only over image/video, not a modal).
+                if !self.show_delete_confirmation {
+                    self.context_menu = Some(p);
+                }
+            }
+            Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } => {
+                if self.scrubbing {
+                    // Commit the seek to the marker's final position.
+                    self.scrubbing = false;
+                    let frac = self.scrub_frac;
+                    if let Some(v) = &mut self.video {
+                        v.seek_to_fraction(frac as f64);
+                    }
+                }
+                self.dragging = false;
+            }
+            Event::MouseMotion { x, y, xrel, yrel, .. } => {
+                let p = Vec2::new(*x, *y);
+                self.mouse_pos = p;
+                // Moving the mouse over a video re-shows the HUD, so the seek bar
+                // is reachable (standard media-player behaviour).
+                if let Some(v) = &mut self.video {
+                    v.bump_controls();
+                }
+                if self.scrubbing {
+                    let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
+                    if let Some(g) = seek_bar_geom(area) {
+                        self.scrub_frac = seek_bar_frac_at(&g, p.x);
+                    }
+                } else if self.dragging && self.image.is_some() {
+                    let delta = Vec2::new(*xrel, *yrel);
+                    self.offset += delta;
+                    // Smooth momentum over the recent gesture.
+                    self.velocity = self.velocity * 0.4 + delta * 0.6;
+                    self.is_scaled_to_fit = false;
+                    self.interacted = true;
+                }
+            }
+            Event::MouseWheel { y, mouse_x, mouse_y, .. } => {
+                if self.image.is_some() && *y != 0.0 {
+                    let cursor = Vec2::new(*mouse_x, *mouse_y);
+                    let old_zoom = self.zoom;
+                    // Scale the wheel delta to roughly match the old feel.
+                    let scroll = *y * 40.0;
+                    let zoom_delta = (scroll / 200.0) * self.zoom;
+                    self.zoom = (self.zoom + zoom_delta).max(0.001);
+                    let image_coords = (cursor - self.offset) / old_zoom;
+                    self.offset -= image_coords * (self.zoom - old_zoom);
+                    self.is_scaled_to_fit = false;
+                    self.velocity = Vec2::ZERO;
+                    self.interacted = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_key(&mut self, kc: Keycode, keymod: Mod, renderer: &Renderer) {
+        let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
+
+        // Clipboard copy (Ctrl+C).
+        if ctrl && kc == Keycode::C {
+            self.copy_to_clipboard();
+            return;
+        }
+
+        // Delete confirmation modal swallows most keys.
+        if self.show_delete_confirmation {
+            match kc {
+                Keycode::Return => self.perform_delete(renderer),
+                Keycode::Escape => self.show_delete_confirmation = false,
+                _ => {}
+            }
+            return;
+        }
+
         let (seek_back, seek_fwd) = self.keybindings.video_seek.keys();
         let (browse_prev, browse_next) = self.keybindings.file_browse.keys();
 
         if self.video.is_some() {
-            // Video playback controls.
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                if let Some(v) = &mut self.video { v.toggle_pause(); }
+            match kc {
+                Keycode::Space => {
+                    if let Some(v) = &mut self.video {
+                        v.toggle_pause();
+                    }
+                }
+                Keycode::A => {
+                    if let Some(v) = &mut self.video {
+                        v.cycle_audio_track();
+                    }
+                }
+                Keycode::S => {
+                    if let Some(v) = &mut self.video {
+                        v.cycle_subtitle_track();
+                    }
+                }
+                _ => {}
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::A)) {
-                if let Some(v) = &mut self.video { v.cycle_audio_track(); }
+            let seek_step = if ctrl { 60.0 } else { 5.0 };
+            if kc == seek_fwd {
+                if let Some(v) = &mut self.video {
+                    v.seek_relative(seek_step);
+                }
+            } else if kc == seek_back {
+                if let Some(v) = &mut self.video {
+                    v.seek_relative(-seek_step);
+                }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::S)) {
-                if let Some(v) = &mut self.video { v.cycle_subtitle_track(); }
-            }
-            // Ctrl+seek skips a minute; plain seek skips 5 seconds.
-            let seek_step = if ctx.input(|i| i.modifiers.ctrl) { 60.0 } else { 5.0 };
-            if ctx.input(|i| i.key_pressed(seek_fwd)) {
-                if let Some(v) = &mut self.video { v.seek_relative(seek_step); }
-            }
-            if ctx.input(|i| i.key_pressed(seek_back)) {
-                if let Some(v) = &mut self.video { v.seek_relative(-seek_step); }
-            }
-            // Browse only on keys that aren't already used for seeking, so a
-            // shared binding never triggers two actions at once.
-            if browse_next != seek_back && browse_next != seek_fwd
-                && ctx.input(|i| i.key_pressed(browse_next)) {
-                self.next_image(ctx);
-            }
-            if browse_prev != seek_back && browse_prev != seek_fwd
-                && ctx.input(|i| i.key_pressed(browse_prev)) {
-                self.prev_image(ctx);
+            // File browsing on keys not already used for seeking.
+            if kc == browse_next && browse_next != seek_back && browse_next != seek_fwd {
+                self.next_image(renderer);
+            } else if kc == browse_prev && browse_prev != seek_back && browse_prev != seek_fwd {
+                self.prev_image(renderer);
             }
         } else {
-            if ctx.input(|i| i.key_pressed(browse_next)) {
-                self.next_image(ctx);
+            if kc == browse_next {
+                self.next_image(renderer);
+            } else if kc == browse_prev {
+                self.prev_image(renderer);
             }
-            if ctx.input(|i| i.key_pressed(browse_prev)) {
-                self.prev_image(ctx);
+        }
+
+        match kc {
+            Keycode::Home => self.first_image(renderer),
+            Keycode::End => self.last_image(renderer),
+            // Escape closes the context menu first, otherwise quits.
+            Keycode::Escape => {
+                if self.context_menu.take().is_none() {
+                    self.should_quit = true;
+                }
             }
+            Keycode::F => {
+                self.is_fullscreen = !self.is_fullscreen;
+            }
+            Keycode::Return => self.is_scaled_to_fit = !self.is_scaled_to_fit,
+            Keycode::Delete => self.show_delete_confirmation = true,
+            _ => {}
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
-            self.first_image(ctx);
+    }
+
+    /// Toggle randomized traversal order, preserving the currently-shown image.
+    fn toggle_random_order(&mut self) {
+        self.is_randomized = !self.is_randomized;
+        if self.image_files.is_empty() {
+            return;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::End)) {
-            self.last_image(ctx);
+        let current = self.image_order[self.current_index];
+        if self.is_randomized {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::rng();
+            self.image_order.shuffle(&mut rng);
+        } else {
+            self.image_order = (0..self.image_files.len()).collect();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.show_delete_confirmation {
-                self.show_delete_confirmation = false;
+        if let Some(pos) = self.image_order.iter().position(|&i| i == current) {
+            self.current_index = pos;
+        }
+    }
+
+    // --- Per-frame update ----------------------------------------------------
+
+    pub fn update(&mut self, renderer: &mut Renderer) {
+        self.check_pending_load(renderer);
+
+        // Engage HDR passthrough when HDR video plays on an HDR-capable display,
+        // and drop back to SDR tone-mapping otherwise (incl. moving to an SDR
+        // monitor). Re-evaluated every frame; reconfiguration is rare.
+        let content_is_hdr = self
+            .video
+            .as_ref()
+            .and_then(|v| v.video_color())
+            .map(|c| c.is_hdr())
+            .unwrap_or(false);
+        renderer.update_hdr_output(content_is_hdr);
+
+        let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
+
+        if let Some(video) = &mut self.video {
+            video.tick(renderer);
+        } else if let Some(image) = &mut self.image {
+            // Advance animation playback (GIFs).
+            if let Some(anim) = &mut image.animation {
+                if anim.frames.len() > 1 {
+                    let mut changed = false;
+                    let mut steps = 0;
+                    while steps < anim.frames.len()
+                        && anim.frame_started.elapsed() >= anim.frames[anim.current].delay
+                    {
+                        anim.frame_started += anim.frames[anim.current].delay;
+                        anim.current = (anim.current + 1) % anim.frames.len();
+                        changed = true;
+                        steps += 1;
+                    }
+                    if steps == anim.frames.len() {
+                        anim.frame_started = Instant::now();
+                    }
+                    if changed {
+                        let frame_image = anim.frames[anim.current].image.clone();
+                        if let Ok(tex) = renderer.upload_texture(&frame_image) {
+                            image.preview_texture = tex;
+                        }
+                        image.full_res_image = frame_image;
+                    }
+                }
+            }
+
+            // Zoom/pan physics (only for stills/animations, not video).
+            let full_res_size =
+                Vec2::new(image.full_res_image.width() as f32, image.full_res_image.height() as f32);
+
+            if self.is_scaled_to_fit {
+                let aspect_ratio = full_res_size.x / full_res_size.y;
+                let available_aspect = area.width() / area.height();
+                let mut fit_size = area.size();
+                if aspect_ratio > available_aspect {
+                    fit_size.y = fit_size.x / aspect_ratio;
+                } else {
+                    fit_size.x = fit_size.y * aspect_ratio;
+                }
+                self.zoom = fit_size.x / full_res_size.x;
+                self.offset = (area.size() - fit_size) * 0.5;
+                self.velocity = Vec2::ZERO;
             } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-            self.is_fullscreen = !self.is_fullscreen;
-        }
-        if !self.show_delete_confirmation && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.is_scaled_to_fit = !self.is_scaled_to_fit;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
-            self.show_delete_confirmation = true;
-        }
-    }
-}
-
-impl eframe::App for ImageViewerApp {
-
-fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-    let ctx = ui.ctx().clone();
-    let is_currently_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-    if self.is_fullscreen != is_currently_fullscreen {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
-    }
-
-    self.handle_keyboard_input(&ctx);
-    self.check_pending_load(&ctx);
-
-    egui::CentralPanel::default()
-        .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
-        .show_inside(ui, |ui| {
-            if let Some(video) = &mut self.video {
-                video.tick(&ctx);
-
-                let available_rect = ui.available_rect_before_wrap();
-                // Consume interaction so the area behaves like the image view.
-                let _ = ui.allocate_rect(available_rect, egui::Sense::click());
-
-                if let Some(tex) = video.texture() {
-                    let frame_size = Vec2::new(video.frame_size[0] as f32, video.frame_size[1] as f32);
-                    let rect = fit_centered(frame_size, available_rect);
-                    ui.painter().image(
-                        tex.id(),
-                        rect,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(egui::RichText::new("Loading video…").color(Color32::from_gray(180)).size(18.0));
-                    });
-                }
-
-                if let Some(text) = video.current_subtitle() {
-                    draw_subtitle(ui.painter(), available_rect, text);
-                }
-                if let Some(osd) = video.osd_text() {
-                    draw_osd(ui.painter(), available_rect, osd);
-                    // Graphical seek/progress bar, shown transiently with the OSD.
-                    draw_seek_bar(ui.painter(), available_rect, video.position_secs(), video.duration_secs());
-                }
-
-                // Keep frames flowing while playing; idle gently when paused.
-                if video.is_playing() {
-                    ctx.request_repaint_after(Duration::from_millis(8));
-                } else {
-                    ctx.request_repaint_after(Duration::from_millis(100));
-                }
-            } else if let Some(image) = &mut self.image {
-                // Advance animation playback (GIFs). Frames are pre-decoded; we step
-                // forward by wall-clock time and re-upload the active frame whenever it
-                // changes, then schedule a repaint for when the next frame is due.
-                if let Some(anim) = &mut image.animation {
-                    if anim.frames.len() > 1 {
-                        let mut changed = false;
-                        // Advance past every frame whose display time has elapsed. The
-                        // step cap guards against a stalled UI (or pathological tiny
-                        // delays) making us spin through the whole animation.
-                        let mut steps = 0;
-                        while steps < anim.frames.len()
-                            && anim.frame_started.elapsed() >= anim.frames[anim.current].delay
-                        {
-                            anim.frame_started += anim.frames[anim.current].delay;
-                            anim.current = (anim.current + 1) % anim.frames.len();
-                            changed = true;
-                            steps += 1;
-                        }
-                        // If we were so far behind we hit the cap, resync to "now" so we
-                        // don't keep racing to catch up frame-by-frame.
-                        if steps == anim.frames.len() {
-                            anim.frame_started = Instant::now();
-                        }
-                        if changed {
-                            let frame_image = anim.frames[anim.current].image.clone();
-                            image.preview_texture = ctx.load_texture(
-                                "anim_frame",
-                                frame_image.clone(),
-                                Default::default(),
-                            );
-                            // Keep full_res_image pointed at the displayed frame so
-                            // clipboard copies grab what the user actually sees.
-                            image.full_res_image = frame_image;
-                        }
-                        let remaining = anim.frames[anim.current]
-                            .delay
-                            .saturating_sub(anim.frame_started.elapsed());
-                        ctx.request_repaint_after(remaining);
-                    }
-                }
-
-                let available_rect = ui.available_rect_before_wrap();
-                let response = ui.allocate_rect(available_rect, egui::Sense::click_and_drag());
-
-                let full_res_size = Vec2::new(image.full_res_image.width() as f32, image.full_res_image.height() as f32);
-
-                // Handle Scale to Fit
-                if self.is_scaled_to_fit {
-                    let aspect_ratio = full_res_size.x / full_res_size.y;
-                    let available_aspect = available_rect.width() / available_rect.height();
-                    let mut fit_size = available_rect.size();
-                    if aspect_ratio > available_aspect {
-                        fit_size.y = fit_size.x / aspect_ratio;
-                    } else {
-                        fit_size.x = fit_size.y * aspect_ratio;
-                    }
-                    self.zoom = fit_size.x / full_res_size.x;
-                    self.offset = (available_rect.size() - fit_size) / 2.0;
-
-                    // Kill velocity when in fit mode
-                    self.velocity = Vec2::ZERO;
-                }
-
-                let mut is_interacting = false;
-
-                // Handle Dragging & Inertia
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    let delta = response.drag_delta();
-                    self.offset += delta;
-                    // Capture momentum as a smoothed average of recent motion rather than
-                    // a single frame's delta. This makes the fling reflect the overall
-                    // gesture and stops a brief pause right before release from killing it.
-                    self.velocity = self.velocity * 0.4 + delta * 0.6;
-                    self.is_scaled_to_fit = false;
-                    is_interacting = true;
-                } else {
-                    // Apply velocity to position first (let it slide)
+                if !self.dragging {
                     self.offset += self.velocity;
                 }
-
-                // Handle Zooming
-                if let Some(hover_pos) = response.hover_pos() {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
-                        let old_zoom = self.zoom;
-                        let zoom_delta = (scroll / 200.0) * self.zoom;
-                        self.zoom = (self.zoom + zoom_delta).max(0.001);
-                        let image_coords = (hover_pos - available_rect.min - self.offset) / old_zoom;
-                        self.offset -= image_coords * (self.zoom - old_zoom);
-                        self.is_scaled_to_fit = false;
-                        self.velocity = Vec2::ZERO;
-                        is_interacting = true;
-                    }
-                }
-
-                // Bouncing & Constraints
-                if !self.is_scaled_to_fit && !is_interacting {
-                    let screen_size = available_rect.size();
-                    let scaled_image_size = full_res_size * self.zoom;
-
-                    let friction = 0.92;    // Slipperyness on valid surface (0.0 - 1.0)
-                    let tension = 0.06;     // Spring stiffness (strength of snap back)
-                    let damping = 0.65;     // Spring damping (prevents endless bouncing)
-
-                    // Helper closure for axis physics
-                    let handle_axis = |offset: &mut f32, velocity: &mut f32, view_dim: f32, img_dim: f32| {
-                        let target_pos;
-                        let is_out_of_bounds;
-
-                        if img_dim <= view_dim {
-                            // If image is smaller than screen, target is the center
-                            target_pos = (view_dim - img_dim) / 2.0;
-                            // Consider it "out of bounds" if it's not centered
-                            is_out_of_bounds = (*offset - target_pos).abs() > 0.5;
-                        } else {
-                            // If image is larger, check edges
-                            let min = view_dim - img_dim; // Far right/bottom edge
-                            let max = 0.0;                // Far left/top edge
-
-                            if *offset > max {
-                                target_pos = max;
-                                is_out_of_bounds = true;
-                            } else if *offset < min {
-                                target_pos = min;
-                                is_out_of_bounds = true;
+                let interacting = self.dragging || self.interacted;
+                if !interacting {
+                    let screen_size = area.size();
+                    let scaled = full_res_size * self.zoom;
+                    let friction = 0.92;
+                    let tension = 0.06;
+                    let damping = 0.65;
+                    let handle_axis =
+                        |offset: &mut f32, velocity: &mut f32, view_dim: f32, img_dim: f32| {
+                            let target_pos;
+                            let is_out_of_bounds;
+                            if img_dim <= view_dim {
+                                target_pos = (view_dim - img_dim) / 2.0;
+                                is_out_of_bounds = (*offset - target_pos).abs() > 0.5;
                             } else {
-                                target_pos = *offset; // No target, effectively
-                                is_out_of_bounds = false;
-                            }
-                        }
-
-                        if is_out_of_bounds {
-                            // Apply spring force toward target
-                            let displacement = target_pos - *offset;
-                            *velocity += displacement * tension; // Accelerate towards edge
-                            *velocity *= damping;                // Slow down (dampen oscillation)
-                        } else {
-                            // Standard friction when inside bounds
-                            *velocity *= friction;
-                        }
-                    };
-
-                    handle_axis(&mut self.offset.x, &mut self.velocity.x, screen_size.x, scaled_image_size.x);
-                    handle_axis(&mut self.offset.y, &mut self.velocity.y, screen_size.y, scaled_image_size.y);
-
-                    // Stop simulation if movement is negligible to save CPU
-                    if self.velocity.length_sq() > 0.01 {
-                        ctx.request_repaint();
-                    } else {
-                        self.velocity = Vec2::ZERO;
-                    }
-                }
-
-                // We keep repainting as long as the image is moving significantly
-                if self.velocity.length_sq() > 0.1 {
-                    ctx.request_repaint();
-                } else {
-                    self.velocity = Vec2::ZERO;
-                }
-
-                let preview_size = image.preview_texture.size_vec2();
-                let preview_scale = preview_size.x / full_res_size.x;
-                let show_tiles = image.needs_tiling && self.zoom > preview_scale;
-
-                if !show_tiles {
-                    if !image.tile_cache.is_empty() {
-                        log::debug!("Zoomed out, clearing tile cache of {} textures.", image.tile_cache.len());
-                        image.tile_cache.clear();
-                    }
-
-                    let scaled_size = full_res_size * self.zoom;
-                    let image_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
-                    ui.painter().image(
-                        image.preview_texture.id(),
-                        image_rect,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                } else {
-                    let screen_offset_in_image_pixels = (available_rect.min - (available_rect.min + self.offset)) / self.zoom;
-                    let screen_size_in_image_pixels = available_rect.size() / self.zoom;
-                    let visible_image_rect = Rect::from_min_size(
-                        Pos2::new(screen_offset_in_image_pixels.x, screen_offset_in_image_pixels.y),
-                        screen_size_in_image_pixels,
-                    );
-
-                    let min_col_f = visible_image_rect.min.x / TILE_SIZE as f32;
-                    let max_col_f = visible_image_rect.max.x / TILE_SIZE as f32;
-                    let min_row_f = visible_image_rect.min.y / TILE_SIZE as f32;
-                    let max_row_f = visible_image_rect.max.y / TILE_SIZE as f32;
-
-                    // Clamp the tile loop bounds to the actual tile grid of the image to prevent visual glitches.
-                    let num_cols = (image.full_res_image.width() + TILE_SIZE - 1) / TILE_SIZE;
-                    let num_rows = (image.full_res_image.height() + TILE_SIZE - 1) / TILE_SIZE;
-
-                    let row_start = (min_row_f.floor() as i32).max(0) as usize;
-                    let row_end = (max_row_f.ceil() as i32).max(0) as usize;
-                    let col_start = (min_col_f.floor() as i32).max(0) as usize;
-                    let col_end = (max_col_f.ceil() as i32).max(0) as usize;
-
-                    for row in row_start..row_end.min(num_rows) {
-                        for col in col_start..col_end.min(num_cols) {
-                            let tile_key = (row, col);
-
-                            // Get both texture and dimensions from cache, or create and cache both.
-                            let (texture_id, tile_dims) = if let Some((texture, dims)) = image.tile_cache.get(&tile_key) {
-                                (texture.id(), *dims)
-                            } else {
-                                let x_start = col * TILE_SIZE;
-                                let y_start = row * TILE_SIZE;
-                                // Calculate the actual width and height of this tile, clamping to image edges
-                                let tile_w = (x_start + TILE_SIZE).min(image.full_res_image.width()) - x_start;
-                                let tile_h = (y_start + TILE_SIZE).min(image.full_res_image.height()) - y_start;
-
-                                if tile_w == 0 || tile_h == 0 { continue; }
-
-                                // Manually copy the pixel data row by row
-                                let mut tile_pixels = Vec::with_capacity(tile_w * tile_h);
-                                for y in 0..tile_h {
-                                    let src_y = y_start + y;
-                                    let row_start_index = src_y * image.full_res_image.width();
-                                    let row_slice_start = row_start_index + x_start;
-                                    tile_pixels.extend_from_slice(&image.full_res_image.pixels[row_slice_start..row_slice_start + tile_w]);
+                                let min = view_dim - img_dim;
+                                let max = 0.0;
+                                if *offset > max {
+                                    target_pos = max;
+                                    is_out_of_bounds = true;
+                                } else if *offset < min {
+                                    target_pos = min;
+                                    is_out_of_bounds = true;
+                                } else {
+                                    target_pos = *offset;
+                                    is_out_of_bounds = false;
                                 }
-
-                                let tile_image = ColorImage { size: [tile_w, tile_h], pixels: tile_pixels, source_size: Vec2::new(tile_w as f32, tile_h as f32) };
-
-                                let texture = ctx.load_texture(format!("tile_{}_{}", row, col), tile_image, Default::default());
-                                let id = texture.id();
-                                let dims = [tile_w, tile_h];
-                                image.tile_cache.insert(tile_key, (texture, dims));
-                                (id, dims)
-                            };
-
-                            let tile_min_in_image_pixels = Pos2::new((col * TILE_SIZE) as f32, (row * TILE_SIZE) as f32);
-                            let tile_min_on_screen = available_rect.min + self.offset + tile_min_in_image_pixels.to_vec2() * self.zoom;
-
-                            // Use the actual tile dimensions for drawing, not the fixed TILE_SIZE.
-                            let tile_dims_vec = Vec2::new(tile_dims[0] as f32, tile_dims[1] as f32);
-                            let tile_screen_rect = Rect::from_min_size(tile_min_on_screen, tile_dims_vec * self.zoom);
-
-                            if available_rect.intersects(tile_screen_rect) {
-                                ui.painter().image(texture_id, tile_screen_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                             }
-                        }
+                            if is_out_of_bounds {
+                                let displacement = target_pos - *offset;
+                                *velocity += displacement * tension;
+                                *velocity *= damping;
+                            } else {
+                                *velocity *= friction;
+                            }
+                        };
+                    handle_axis(&mut self.offset.x, &mut self.velocity.x, screen_size.x, scaled.x);
+                    handle_axis(&mut self.offset.y, &mut self.velocity.y, screen_size.y, scaled.y);
+                    if self.velocity.length_sq() <= 0.01 {
+                        self.velocity = Vec2::ZERO;
                     }
                 }
-
-                let scaled_size = full_res_size * self.zoom;
-                let image_screen_rect = Rect::from_min_size(available_rect.min + self.offset, scaled_size);
-                if ui.clip_rect().intersects(image_screen_rect) {
-                    ui.painter().add(Shape::Rect(RectShape::stroke(image_screen_rect, 0.0, (1.0, Color32::from_gray(80)), egui::StrokeKind::Outside)));
-                }
-
-                response.context_menu(|ui| {
-                    if ui.checkbox(&mut self.is_fullscreen, "Fullscreen (F)").clicked() {
-                        ui.close();
-                    };
-                    if ui.checkbox(&mut self.is_scaled_to_fit, "Scale to fit (Enter)").clicked() {
-                        ui.close();
-                    };
-                    if ui.checkbox(&mut self.is_randomized, "Random order").clicked() {
-                        if self.is_randomized {
-                            let current_image_index = self.image_order[self.current_index];
-                            #[allow(deprecated)]
-                            let mut rng = rand::rng();
-                            use rand::seq::SliceRandom;
-                            self.image_order.shuffle(&mut rng);
-                            if let Some(pos) = self.image_order.iter().position(|&i| i == current_image_index) {
-                                self.current_index = pos;
-                            }
-                        } else {
-                            let current_image_index = self.image_order[self.current_index];
-                            self.image_order = (0..self.image_files.len()).collect();
-                            if let Some(pos) = self.image_order.iter().position(|&i| i == current_image_index) {
-                                self.current_index = pos;
-                            }
-                        }
-                        ui.close();
-                    };
-                });
-
-            } else if let Some(err) = &self.last_error {
-                ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new(err).color(Color32::RED).size(18.0));
-                });
-            } else if self.full_res_pending {
-                let current_path = self
-                    .image_files
-                    .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX));
-                let label = match current_path {
-                    Some(p) => format!("Loading {}…", p.display()),
-                    None => "Loading…".to_string(),
-                };
-                ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new(label).color(Color32::from_gray(180)).size(18.0));
-                });
             }
-        });
+        }
 
-    if self.show_delete_confirmation {
-            let path = self.image_files.get(self.image_order[self.current_index]).cloned();
-        egui::Window::new("Delete File")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(&ctx, |ui| {
-                if let Some(path) = &path {
-                ui.label(format!("Are you sure you want to delete '{}'?", path.display()));
-                ui.add_space(10.0);
-                let confirm_with_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.show_delete_confirmation = false;
-                    }
-                    if ui.button(egui::RichText::new("Delete").color(Color32::RED)).clicked() || confirm_with_enter {
-                        // Compute the cache path *before* deleting the source — the cache
-                        // filename hash incorporates the file's size and mtime, which
-                        // become unavailable once the file is gone.
-                        let cache_path = preload_cache_path(path);
-                        if let Err(e) = fs::remove_file(path) {
-                            self.last_error = Some(format!("Failed to delete file: {}", e));
-                        } else {
-                            log::info!("Deleted file: {}", path.display());
-                            if cache_path.exists() {
-                                if let Err(e) = fs::remove_file(&cache_path) {
-                                    log::warn!("Failed to delete preload cache {}: {}", cache_path.display(), e);
-                                }
-                            }
-                            let removed_order_index = self.image_order.remove(self.current_index);
-                            self.image_files.remove(removed_order_index);
-                            for order_idx in self.image_order.iter_mut() {
-                                if *order_idx > removed_order_index {
-                                    *order_idx -= 1;
-                                }
-                            }
-                            if self.image_files.is_empty() {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            } else {
-                                self.current_index %= self.image_files.len();
-                                self.load_image_at_index(self.current_index, &ctx);
-                            }
-                        }
-                        self.show_delete_confirmation = false;
-                    }
+        self.interacted = false;
+    }
+
+    // --- Render --------------------------------------------------------------
+
+    pub fn render(&mut self, renderer: &mut Renderer) -> anyhow::Result<()> {
+        // Apply fullscreen toggles requested via key/menu.
+        if renderer.is_fullscreen() != self.is_fullscreen {
+            renderer.set_fullscreen(self.is_fullscreen);
+        }
+
+        renderer.begin_frame();
+        let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
+
+        if let Some(video) = &self.video {
+            if let Some((y, uv)) = video.planes() {
+                let frame_size =
+                    Vec2::new(video.frame_size[0] as f32, video.frame_size[1] as f32);
+                let rect = fit_centered(frame_size, area);
+                let params = video.video_color().map(|c| VideoColorParams {
+                    transfer: match c.transfer {
+                        crate::video::Transfer::Sdr => 0,
+                        crate::video::Transfer::Pq => 1,
+                        crate::video::Transfer::Hlg => 2,
+                    },
+                    bt2020: c.bt2020_primaries,
+                    full_range: c.full_range,
+                    peak_nits: c.peak_nits,
+                    sdr_white_nits: c.sdr_white_nits,
+                }).unwrap_or(VideoColorParams {
+                    transfer: 0,
+                    bt2020: false,
+                    full_range: false,
+                    peak_nits: 1000.0,
+                    sdr_white_nits: 203.0,
                 });
+                renderer.draw_video(y, uv, rect, params);
+            } else {
+                let pos = area.center();
+                renderer.draw_text(
+                    "Loading video…",
+                    18.0,
+                    pos,
+                    TextAlign::Center,
+                    gray(180),
+                );
+            }
+            if let Some(text) = video.current_subtitle() {
+                draw_subtitle(renderer, area, &text);
+            }
+            if let Some(osd) = video.osd_text() {
+                draw_osd(renderer, area, &osd);
+            }
+            // The seek bar / time HUD auto-hides a few seconds after the last
+            // interaction and reappears on seek / pause / resume. While scrubbing
+            // it stays up and previews the marker at the drag position.
+            if video.controls_visible() || self.scrubbing {
+                let scrub = self.scrubbing.then_some(self.scrub_frac);
+                draw_seek_bar(renderer, area, video.position_secs(), video.duration_secs(), scrub);
+            }
+        } else if self.image.is_some() {
+            self.render_image(renderer, area);
+        } else if let Some(err) = self.last_error.clone() {
+            renderer.draw_text(&err, 18.0, area.center(), TextAlign::Center, rgba8(230, 60, 60, 255));
+        } else if self.full_res_pending {
+            let current_path = self
+                .image_files
+                .get(self.image_order.get(self.current_index).copied().unwrap_or(usize::MAX));
+            let label = match current_path {
+                Some(p) => format!("Loading {}…", p.display()),
+                None => "Loading…".to_string(),
+            };
+            renderer.draw_text(&label, 18.0, area.center(), TextAlign::Center, gray(180));
+        }
+
+        if self.show_delete_confirmation {
+            self.render_delete_dialog(renderer, area);
+        }
+        if self.context_menu.is_some() {
+            self.render_context_menu(renderer, area);
+        }
+
+        renderer.end_frame()
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_image(&mut self, renderer: &mut Renderer, area: Rect) {
+        let Some(image) = &mut self.image else { return };
+        let full_res_size =
+            Vec2::new(image.full_res_image.width() as f32, image.full_res_image.height() as f32);
+
+        let preview_size =
+            Vec2::new(image.preview_texture.width() as f32, image.preview_texture.height() as f32);
+        let preview_scale = preview_size.x / full_res_size.x;
+        let show_tiles = image.needs_tiling && self.zoom > preview_scale;
+
+        if !show_tiles {
+            if !image.tile_cache.is_empty() {
+                image.tile_cache.clear();
+            }
+            let scaled_size = full_res_size * self.zoom;
+            let image_rect = Rect::from_min_size(area.min + self.offset, scaled_size);
+            renderer.draw_texture_full(&image.preview_texture, image_rect, WHITE);
+        } else {
+            let img_w = image.full_res_image.width();
+            let img_h = image.full_res_image.height();
+            // Visible region of the image in image-pixel space.
+            let vis_min = (Vec2::ZERO - self.offset) / self.zoom;
+            let vis_size = area.size() / self.zoom;
+
+            let min_col = (vis_min.x / TILE_SIZE as f32).floor().max(0.0) as usize;
+            let max_col = ((vis_min.x + vis_size.x) / TILE_SIZE as f32).ceil().max(0.0) as usize;
+            let min_row = (vis_min.y / TILE_SIZE as f32).floor().max(0.0) as usize;
+            let max_row = ((vis_min.y + vis_size.y) / TILE_SIZE as f32).ceil().max(0.0) as usize;
+
+            let num_cols = (img_w + TILE_SIZE - 1) / TILE_SIZE;
+            let num_rows = (img_h + TILE_SIZE - 1) / TILE_SIZE;
+
+            for row in min_row..max_row.min(num_rows) {
+                for col in min_col..max_col.min(num_cols) {
+                    let tile_key = (row, col);
+                    let (tex, dims) = if let Some((t, d)) = image.tile_cache.get(&tile_key) {
+                        (t.clone(), *d)
+                    } else {
+                        let x_start = col * TILE_SIZE;
+                        let y_start = row * TILE_SIZE;
+                        let tile_w = (x_start + TILE_SIZE).min(img_w) - x_start;
+                        let tile_h = (y_start + TILE_SIZE).min(img_h) - y_start;
+                        if tile_w == 0 || tile_h == 0 {
+                            continue;
+                        }
+                        // Copy the tile's RGBA rows out of the full-res buffer.
+                        let mut tile_rgba = Vec::with_capacity(tile_w * tile_h * 4);
+                        for y in 0..tile_h {
+                            let src_y = y_start + y;
+                            let row_start = (src_y * img_w + x_start) * 4;
+                            tile_rgba.extend_from_slice(
+                                &image.full_res_image.rgba[row_start..row_start + tile_w * 4],
+                            );
+                        }
+                        let buf = PixelBuf::new(tile_w as u32, tile_h as u32, tile_rgba);
+                        let Ok(tex) = renderer.upload_texture(&buf) else { continue };
+                        let dims = [tile_w, tile_h];
+                        image.tile_cache.insert(tile_key, (tex.clone(), dims));
+                        (tex, dims)
+                    };
+
+                    let tile_min_on_screen = area.min
+                        + self.offset
+                        + Vec2::new((col * TILE_SIZE) as f32, (row * TILE_SIZE) as f32) * self.zoom;
+                    let tile_screen_rect = Rect::from_min_size(
+                        tile_min_on_screen,
+                        Vec2::new(dims[0] as f32, dims[1] as f32) * self.zoom,
+                    );
+                    if area.intersects(tile_screen_rect) {
+                        renderer.draw_texture_full(&tex, tile_screen_rect, WHITE);
+                    }
                 }
-            });
+            }
+        }
+
+        // Selection border around the (notional) full image rect.
+        let scaled_size = full_res_size * self.zoom;
+        let image_screen_rect = Rect::from_min_size(area.min + self.offset, scaled_size);
+        if area.intersects(image_screen_rect) {
+            renderer.stroke_rect(image_screen_rect, 1.0, gray(80));
         }
     }
-}
 
-impl Drop for ImageViewerApp {
-    fn drop(&mut self) {
+    fn render_delete_dialog(&self, renderer: &mut Renderer, area: Rect) {
+        let path = self.image_files.get(self.image_order[self.current_index]).cloned();
+        let msg = match &path {
+            Some(p) => format!("Delete '{}'?", p.display()),
+            None => "Delete this file?".to_string(),
+        };
+        // Dim the background.
+        renderer.fill_rect(area, rgba8(0, 0, 0, 140));
+
+        let (panel, cancel, delete) = delete_dialog_layout(area);
+        renderer.fill_rect(panel, rgba8(40, 40, 40, 245));
+        renderer.stroke_rect(panel, 1.0, gray(90));
+
+        renderer.draw_text(
+            &msg,
+            16.0,
+            Vec2::new(panel.center().x, panel.min.y + 24.0),
+            TextAlign::Center,
+            WHITE,
+        );
+        self.draw_button(renderer, cancel, "Cancel", false);
+        self.draw_button(renderer, delete, "Delete", true);
+    }
+
+    /// Draw a labelled button with a hover highlight (`danger` colours destructive
+    /// actions red). Hit-testing against the same rect lives in `handle_event`.
+    fn draw_button(&self, renderer: &mut Renderer, rect: Rect, label: &str, danger: bool) {
+        let hovered = rect.contains(self.mouse_pos);
+        let fill = match (danger, hovered) {
+            (true, true) => rgba8(190, 70, 70, 255),
+            (true, false) => rgba8(150, 50, 50, 255),
+            (false, true) => rgba8(95, 95, 95, 255),
+            (false, false) => rgba8(70, 70, 70, 255),
+        };
+        renderer.fill_rect(rect, fill);
+        renderer.stroke_rect(rect, 1.0, gray(120));
+        renderer.draw_text(
+            label,
+            15.0,
+            Vec2::new(rect.center().x, rect.center().y - 9.0),
+            TextAlign::Center,
+            WHITE,
+        );
+    }
+
+    fn render_context_menu(&self, renderer: &mut Renderer, area: Rect) {
+        let Some(anchor) = self.context_menu else { return };
+        let (panel, rows) = context_menu_layout(anchor, area);
+        renderer.fill_rect(panel, rgba8(35, 35, 35, 245));
+        renderer.stroke_rect(panel, 1.0, gray(90));
+
+        let items = [
+            ("Fullscreen (F)", self.is_fullscreen),
+            ("Scale to fit (Enter)", self.is_scaled_to_fit),
+            ("Random order", self.is_randomized),
+        ];
+        for (row, (label, checked)) in rows.iter().zip(items.iter()) {
+            if row.contains(self.mouse_pos) {
+                renderer.fill_rect(*row, rgba8(255, 255, 255, 28));
+            }
+            // Checkbox: outlined box, filled when the setting is on.
+            let bs = 16.0;
+            let bx = Rect::xywh(row.min.x + 8.0, row.center().y - bs / 2.0, bs, bs);
+            renderer.stroke_rect(bx, 1.5, gray(200));
+            if *checked {
+                renderer.fill_rect(
+                    Rect::xywh(bx.min.x + 3.0, bx.min.y + 3.0, bs - 6.0, bs - 6.0),
+                    rgba8(120, 180, 255, 255),
+                );
+            }
+            renderer.draw_text(
+                label,
+                15.0,
+                Vec2::new(bx.max().x + 10.0, row.center().y - 9.0),
+                TextAlign::Left,
+                WHITE,
+            );
+        }
+    }
+
+    // --- Main-loop queries ---------------------------------------------------
+
+    /// Whether the app needs continuous frames (vs. blocking until an event).
+    pub fn is_active(&self) -> bool {
+        if self.should_quit {
+            return true;
+        }
+        if let Some(v) = &self.video {
+            // Keep rendering while playing, and while the HUD is fading so it
+            // hides/reappears promptly even when paused.
+            if v.is_playing() || v.controls_visible() {
+                return true;
+            }
+        }
+        if let Some(img) = &self.image {
+            if img.animation.as_ref().map(|a| a.frames.len() > 1).unwrap_or(false) {
+                return true;
+            }
+        }
+        self.full_res_pending
+            || self.dragging
+            || self.scrubbing
+            || self.velocity.length_sq() > 0.01
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        self.should_quit
+    }
+
+    pub fn shutdown(&mut self) {
         self.shutdown_workers();
+        self.video = None;
     }
 }

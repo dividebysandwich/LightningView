@@ -1,5 +1,4 @@
 // --- Image Loading & Helper Functions ---
-use egui::ColorImage;
 use image::{codecs::gif::GifDecoder, imageops, AnimationDecoder, DynamicImage, ImageReader, Luma};
 use jxl_oxide::integration::JxlDecoder;
 use libjpeg_turbo_rs as ljt;
@@ -16,7 +15,7 @@ use std::{
 };
 
 use crate::formats::*;
-use crate::types::{AnimationFrame, LoadedImage};
+use crate::types::{AnimationFrame, LoadedImage, PixelBuf};
 
 /// Target maximum dimension (in pixels) for the fast preview decode. Matches the
 /// `max_texture_side` used when building the preview texture, so the preview we
@@ -61,7 +60,7 @@ pub fn load_full_for_worker(path: &Path) -> Result<(LoadedImage, Option<DynamicI
     // Build the display image from a borrow so we keep `dynamic_image` for the
     // cache step. For RGB JPEGs (the common case) this costs nothing extra over
     // `into_rgba8`, which would also allocate a fresh RGBA buffer.
-    let color = color_image_from_dynamic(&dynamic_image);
+    let color = pixel_buf_from_dynamic(&dynamic_image);
     Ok((LoadedImage::Static(color), Some(dynamic_image)))
 }
 
@@ -194,7 +193,7 @@ fn load_animated_gif(path: &str) -> Result<LoadedImage, String> {
         let delay = Duration::from(frame.delay()).max(Duration::from_millis(20));
         let buffer = frame.into_buffer();
         let dims = buffer.dimensions();
-        let image = ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], buffer.as_raw());
+        let image = PixelBuf::new(dims.0, dims.1, buffer.into_raw());
         frames.push(AnimationFrame { image, delay });
     }
 
@@ -228,18 +227,19 @@ fn load_gif_first_frame(path: &str) -> Result<DynamicImage, String> {
     Ok(DynamicImage::ImageRgba8(frame.into_buffer()))
 }
 
-pub fn to_egui_color_image(img: DynamicImage) -> ColorImage {
+/// Consume a `DynamicImage` into a tightly-packed RGBA8 [`PixelBuf`] for upload.
+pub fn to_pixel_buf(img: DynamicImage) -> PixelBuf {
     let rgba = img.into_rgba8();
     let dims = rgba.dimensions();
-    ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], rgba.as_raw())
+    PixelBuf::new(dims.0, dims.1, rgba.into_raw())
 }
 
-/// Like `to_egui_color_image` but borrows the source so the caller can keep the
+/// Like `to_pixel_buf` but borrows the source so the caller can keep the
 /// `DynamicImage` afterwards (e.g. to generate the preload cache).
-pub fn color_image_from_dynamic(img: &DynamicImage) -> ColorImage {
+pub fn pixel_buf_from_dynamic(img: &DynamicImage) -> PixelBuf {
     let rgba = img.to_rgba8();
     let dims = rgba.dimensions();
-    ColorImage::from_rgba_unmultiplied([dims.0 as _, dims.1 as _], rgba.as_raw())
+    PixelBuf::new(dims.0, dims.1, rgba.into_raw())
 }
 
 fn load_with_image_crate(path: &str) -> Result<DynamicImage, String> {
@@ -370,8 +370,8 @@ pub fn get_absolute_path(filename: &str) -> Result<PathBuf, String> {
     }
 }
 
-pub fn downscale_color_image(image: &ColorImage, max_size: usize) -> ColorImage {
-    let (width, height) = (image.size[0] as u32, image.size[1] as u32);
+pub fn downscale_pixel_buf(image: &PixelBuf, max_size: usize) -> PixelBuf {
+    let (width, height) = (image.size[0], image.size[1]);
     let max = max_size as u32;
     if width <= max && height <= max {
         return image.clone();
@@ -382,10 +382,8 @@ pub fn downscale_color_image(image: &ColorImage, max_size: usize) -> ColorImage 
     } else {
         (((max as f32 * aspect_ratio).round() as u32).max(1), max)
     };
-    // `Color32` is `#[repr(C)] [u8; 4]`, so the pixel buffer is already RGBA bytes.
-    let raw: &[u8] = bytemuck::cast_slice(&image.pixels);
-    let resized = fast_resize_rgba(raw, (width, height), (new_w, new_h));
-    ColorImage::from_rgba_unmultiplied([new_w as _, new_h as _], &resized)
+    let resized = fast_resize_rgba(&image.rgba, (width, height), (new_w, new_h));
+    PixelBuf::new(new_w, new_h, resized)
 }
 
 #[cfg(test)]
@@ -480,7 +478,7 @@ mod tests {
             image::load_from_memory(&bytes).unwrap();
         });
         bench("zune full -> RGBA", &|| {
-            image::load_from_memory(&bytes).unwrap().into_rgba8();
+            let _ = image::load_from_memory(&bytes).unwrap().into_rgba8();
         });
         bench("turbo full -> RGBA", &|| {
             decode_jpeg_turbo(&bytes, None).unwrap();

@@ -1,5 +1,5 @@
 // --- Advanced Data Structures for Tiled Viewing ---
-use egui::{ColorImage, TextureHandle};
+use crate::gpu::GpuTexture;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -11,13 +11,47 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A backend-neutral, tightly-packed RGBA8 (unmultiplied alpha) image kept in
+/// CPU memory. Replaces `egui::ColorImage` as the boundary type produced by the
+/// decoders and consumed by the SDL_GPU renderer when uploading textures.
+#[derive(Clone)]
+pub struct PixelBuf {
+    /// `[width, height]` in pixels.
+    pub size: [u32; 2],
+    /// Row-major RGBA8 bytes, `width * height * 4` long, no row padding.
+    pub rgba: Vec<u8>,
+}
+
+impl PixelBuf {
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        debug_assert_eq!(rgba.len(), width as usize * height as usize * 4);
+        Self { size: [width, height], rgba }
+    }
+
+    #[inline]
+    pub fn width(&self) -> usize {
+        self.size[0] as usize
+    }
+
+    #[inline]
+    pub fn height(&self) -> usize {
+        self.size[1] as usize
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.rgba
+    }
+}
+
 pub struct DisplayableImage {
     /// The full-resolution original image, kept in CPU memory.
-    pub full_res_image: ColorImage,
+    pub full_res_image: PixelBuf,
     /// A single, downscaled texture for fast previews when zoomed out.
-    pub preview_texture: TextureHandle,
+    pub preview_texture: GpuTexture,
     /// Cache for detail tiles to avoid re-uploading them to the GPU every frame.
-    pub tile_cache: HashMap<(usize, usize), (TextureHandle, [usize; 2])>,
+    pub tile_cache: HashMap<(usize, usize), (GpuTexture, [usize; 2])>,
     /// Does this image actually need tiling, or is it small enough to fit on the GPU?
     pub needs_tiling: bool,
     /// Animation playback state for animated images (e.g. GIFs). `None` for stills.
@@ -131,7 +165,7 @@ impl MemoryGate {
 /// One frame of an animated image (e.g. GIF), already composited to the full
 /// canvas, plus how long it should be shown before advancing.
 pub struct AnimationFrame {
-    pub image: ColorImage,
+    pub image: PixelBuf,
     pub delay: Duration,
 }
 
@@ -147,6 +181,6 @@ pub struct Animation {
 
 // Simplified enum for loaded image data before GPU upload
 pub enum LoadedImage {
-    Static(ColorImage),
+    Static(PixelBuf),
     Animated(Vec<AnimationFrame>),
 }

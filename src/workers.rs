@@ -12,7 +12,7 @@ use std::{
 
 use crate::cache::{preload_cache_path, save_preload_cache};
 use crate::decode::{
-    decode_image_data, decode_preview, jpeg_dimensions, load_full_for_worker, to_egui_color_image,
+    decode_image_data, decode_preview, jpeg_dimensions, load_full_for_worker, to_pixel_buf,
     PREVIEW_MAX_DIM,
 };
 use crate::types::{FullResReply, FullResRequest, FullResWorker, LoadedImage, MemoryGate, PreloadState};
@@ -108,17 +108,20 @@ fn preload_worker_loop(state: Arc<PreloadState>, queue: Arc<Mutex<VecDeque<PathB
 /// longer cares about) drop their results when they eventually finish. The
 /// `MemoryGate` caps concurrency so a burst of rapid navigation can't OOM the
 /// system on large RAW/FITS files.
-pub fn spawn_full_res_worker(ctx: egui::Context, gate: Arc<MemoryGate>) -> FullResWorker {
+///
+/// Replies are delivered over the mpsc channel; the SDL main loop drains them on
+/// its next iteration (it keeps a short wait timeout while a decode is pending),
+/// so no cross-thread repaint signal is needed.
+pub fn spawn_full_res_worker(gate: Arc<MemoryGate>) -> FullResWorker {
     let (req_tx, req_rx) = channel::<FullResRequest>();
     let (reply_tx, reply_rx) = channel::<FullResReply>();
-    thread::spawn(move || full_res_dispatcher_loop(req_rx, reply_tx, ctx, gate));
+    thread::spawn(move || full_res_dispatcher_loop(req_rx, reply_tx, gate));
     FullResWorker { tx: req_tx, rx: reply_rx }
 }
 
 fn full_res_dispatcher_loop(
     req_rx: Receiver<FullResRequest>,
     reply_tx: Sender<FullResReply>,
-    ctx: egui::Context,
     gate: Arc<MemoryGate>,
 ) {
     // Bumped on every accepted request; a decode thread only sends its reply if
@@ -143,7 +146,6 @@ fn full_res_dispatcher_loop(
         }
         let my_gen = generation.fetch_add(1, Ordering::Relaxed) + 1;
         let reply_tx = reply_tx.clone();
-        let ctx2 = ctx.clone();
         let generation2 = generation.clone();
         let gate2 = gate.clone();
         thread::spawn(move || {
@@ -183,11 +185,9 @@ fn full_res_dispatcher_loop(
                             path: req.path.clone(),
                             preview_width: 0,
                             is_preview: true,
-                            result: Ok(LoadedImage::Static(to_egui_color_image(img))),
+                            result: Ok(LoadedImage::Static(to_pixel_buf(img))),
                         };
-                        if reply_tx.send(reply).is_ok() {
-                            ctx2.request_repaint();
-                        }
+                        let _ = reply_tx.send(reply);
                     }
                 }
             }
@@ -216,9 +216,7 @@ fn full_res_dispatcher_loop(
                 is_preview: false,
                 result,
             };
-            if reply_tx.send(reply).is_ok() {
-                ctx2.request_repaint();
-            }
+            let _ = reply_tx.send(reply);
             // Cache generation (resize + JPEG encode + disk write) now runs *after*
             // the UI already has its image, so it never delays first paint.
             if let Some(dyn_img) = dyn_for_cache {
