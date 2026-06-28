@@ -97,12 +97,43 @@ struct DrawCmd {
     count: u32,
 }
 
+/// Colour description for a video frame, supplied by the caller and packed into
+/// the video shader's uniform. Drives YUV matrix, range, and HDR tone-mapping.
+#[derive(Clone, Copy)]
+pub struct VideoColorParams {
+    /// 0 = SDR, 1 = PQ, 2 = HLG.
+    pub transfer: i32,
+    /// BT.2020 primaries (true) vs BT.709 (false).
+    pub bt2020: bool,
+    pub full_range: bool,
+    pub peak_nits: f32,
+    pub sdr_white_nits: f32,
+}
+
+/// std140-compatible layout pushed as the video fragment uniform (two vec4s).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VideoUniforms {
+    mode: [i32; 4], // transfer, bt2020, full_range, unused
+    lum: [f32; 4],  // peak_nits, sdr_white_nits, unused, unused
+}
+
+impl From<VideoColorParams> for VideoUniforms {
+    fn from(p: VideoColorParams) -> Self {
+        VideoUniforms {
+            mode: [p.transfer, p.bt2020 as i32, p.full_range as i32, 0],
+            lum: [p.peak_nits, p.sdr_white_nits, 0.0, 0.0],
+        }
+    }
+}
+
 /// The current frame's video quad, drawn before the overlay batch using the
-/// dedicated YUV pipeline (two plane samplers).
+/// dedicated YUV pipeline (two plane samplers + a colour uniform).
 struct VideoDraw {
     y: Texture<'static>,
     uv: Texture<'static>,
     first: u32,
+    uniforms: VideoUniforms,
 }
 
 /// Horizontal text anchor for `draw_text`.
@@ -185,8 +216,8 @@ impl Renderer {
             sdl3::gpu::SwapchainComposition::Sdr,
         );
 
-        let pipeline = build_pipeline(&device, &window, QUAD_FRAG_SPV, 1)?;
-        let video_pipeline = build_pipeline(&device, &window, VIDEO_FRAG_SPV, 2)?;
+        let pipeline = build_pipeline(&device, &window, QUAD_FRAG_SPV, 1, 0)?;
+        let video_pipeline = build_pipeline(&device, &window, VIDEO_FRAG_SPV, 2, 1)?;
 
         let sampler = device
             .create_sampler(
@@ -298,25 +329,43 @@ impl Renderer {
         self.cmds.push(DrawCmd { tex, first, count: 6 });
     }
 
-    /// Draw an NV12 video frame (Y + UV plane textures) into `dst`, beneath this
-    /// frame's overlay batch. The YUV->RGB conversion happens in the video shader.
-    pub fn draw_video(&mut self, y: &GpuTexture, uv: &GpuTexture, dst: Rect) {
+    /// Draw a YUV video frame (Y + UV plane textures) into `dst`, beneath this
+    /// frame's overlay batch. The video shader converts YUV->RGB and, for HDR
+    /// (`params.transfer != 0`), tone-maps to SDR.
+    pub fn draw_video(
+        &mut self,
+        y: &GpuTexture,
+        uv: &GpuTexture,
+        dst: Rect,
+        params: VideoColorParams,
+    ) {
         let first = self.append_quad_verts(dst, full_uv(), WHITE);
         self.video_draw = Some(VideoDraw {
             y: y.tex.clone(),
             uv: uv.tex.clone(),
             first,
+            uniforms: params.into(),
         });
     }
 
-    /// Upload a single-channel (R8) plane — e.g. an NV12 luma plane.
+    /// Upload a single-channel 8-bit (R8) plane — an NV12 luma plane.
     pub fn upload_r8(&self, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTexture> {
         upload_plane(&self.device, w, h, bytes, sdl3::gpu::TextureFormat::R8Unorm, 1)
     }
 
-    /// Upload a two-channel (R8G8) plane — e.g. an NV12 interleaved chroma plane.
+    /// Upload a two-channel 8-bit (R8G8) plane — an NV12 interleaved chroma plane.
     pub fn upload_r8g8(&self, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTexture> {
         upload_plane(&self.device, w, h, bytes, sdl3::gpu::TextureFormat::R8g8Unorm, 2)
+    }
+
+    /// Upload a single-channel 16-bit (R16) plane — a P010 luma plane.
+    pub fn upload_r16(&self, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTexture> {
+        upload_plane(&self.device, w, h, bytes, sdl3::gpu::TextureFormat::R16Unorm, 2)
+    }
+
+    /// Upload a two-channel 16-bit (R16G16) plane — a P010 interleaved chroma plane.
+    pub fn upload_r16g16(&self, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTexture> {
+        upload_plane(&self.device, w, h, bytes, sdl3::gpu::TextureFormat::R16g16Unorm, 4)
     }
 
     /// Draw a texture into `dst` (pixel space). `uv` selects the source region
@@ -467,6 +516,7 @@ impl Renderer {
                     // Video frame first (beneath the overlays), via the YUV pipeline.
                     if let Some(vd) = &video_draw {
                         pass.bind_graphics_pipeline(&self.video_pipeline);
+                        cmd.push_fragment_uniform_data(0, &vd.uniforms);
                         pass.bind_fragment_samplers(
                             0,
                             &[
@@ -606,6 +656,7 @@ fn build_pipeline(
     window: &Window,
     frag_code: &[u8],
     num_samplers: u32,
+    num_frag_uniforms: u32,
 ) -> Result<GraphicsPipeline> {
     let vert = device
         .create_shader()
@@ -617,6 +668,7 @@ fn build_pipeline(
         .create_shader()
         .with_code(ShaderFormat::SPIRV, frag_code, ShaderStage::Fragment)
         .with_samplers(num_samplers)
+        .with_uniform_buffers(num_frag_uniforms)
         .with_entrypoint(c"main")
         .build()
         .map_err(|e| anyhow!("build fragment shader: {e}"))?;

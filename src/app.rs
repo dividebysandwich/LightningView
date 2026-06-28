@@ -22,7 +22,7 @@ use crate::cache::{load_preload_cache, preload_cache_path};
 use crate::config::KeyBindings;
 use crate::decode::{downscale_pixel_buf, is_video_file, scan_supported_images, to_pixel_buf};
 use crate::geom::{Rect, Vec2};
-use crate::gpu::{gray, rgba8, Renderer, TextAlign, WHITE};
+use crate::gpu::{gray, rgba8, Renderer, TextAlign, VideoColorParams, WHITE};
 use crate::thumbnail::load_embedded_thumbnail;
 use crate::types::{
     Animation, AnimationFrame, DisplayableImage, FullResRequest, FullResWorker, LoadedImage,
@@ -998,7 +998,24 @@ impl ImageViewerApp {
                 let frame_size =
                     Vec2::new(video.frame_size[0] as f32, video.frame_size[1] as f32);
                 let rect = fit_centered(frame_size, area);
-                renderer.draw_video(y, uv, rect);
+                let params = video.video_color().map(|c| VideoColorParams {
+                    transfer: match c.transfer {
+                        crate::video::Transfer::Sdr => 0,
+                        crate::video::Transfer::Pq => 1,
+                        crate::video::Transfer::Hlg => 2,
+                    },
+                    bt2020: c.bt2020_primaries,
+                    full_range: c.full_range,
+                    peak_nits: c.peak_nits,
+                    sdr_white_nits: c.sdr_white_nits,
+                }).unwrap_or(VideoColorParams {
+                    transfer: 0,
+                    bt2020: false,
+                    full_range: false,
+                    peak_nits: 1000.0,
+                    sdr_white_nits: 203.0,
+                });
+                renderer.draw_video(y, uv, rect, params);
             } else {
                 let pos = area.center();
                 renderer.draw_text(

@@ -12,7 +12,7 @@ use anyhow::Result;
 use crate::audio::AudioPlayer;
 use crate::gpu::{GpuTexture, Renderer};
 use crate::subtitles::{self, SubtitleSet};
-use crate::video::VideoStream;
+use crate::video::{ColorInfo, FrameDepth, VideoStream};
 
 const OSD_DURATION: Duration = Duration::from_millis(2000);
 
@@ -33,10 +33,12 @@ pub struct VideoState {
     /// playable audio stream). Otherwise the wall clock below drives playback.
     use_audio_clock: bool,
     subtitles: SubtitleSet,
-    /// Current frame's NV12 plane textures (luma, interleaved chroma). Replaced
+    /// Current frame's YUV plane textures (luma, interleaved chroma). Replaced
     /// each time a new frame is uploaded; the GPU video shader converts to RGB.
     y_tex: Option<GpuTexture>,
     uv_tex: Option<GpuTexture>,
+    /// Colour description of the most recently uploaded frame (SDR vs HDR, etc.).
+    color: Option<ColorInfo>,
     pub frame_size: [usize; 2],
     duration: Option<Duration>,
     av_offset_secs: f64,
@@ -99,6 +101,7 @@ impl VideoState {
             subtitles,
             y_tex: None,
             uv_tex: None,
+            color: None,
             frame_size,
             duration,
             av_offset_secs,
@@ -182,10 +185,20 @@ impl VideoState {
         let clock = self.advance_clock();
         if let Some(frame) = self.stream.frame_at(clock) {
             self.frame_size = [frame.width as usize, frame.height as usize];
-            // Upload the two NV12 planes as GPU textures; the previous frame's
-            // textures are freed when these assignments drop them.
-            let y = renderer.upload_r8(frame.width, frame.height, &frame.y_plane);
-            let uv = renderer.upload_r8g8(frame.chroma_width, frame.chroma_height, &frame.uv_plane);
+            self.color = Some(frame.color);
+            // Upload the two YUV planes as GPU textures (R8/R8G8 for 8-bit NV12,
+            // R16/R16G16 for 10-bit P010). The previous frame's textures are freed
+            // when these assignments drop them.
+            let (y, uv) = match frame.depth {
+                FrameDepth::Eight => (
+                    renderer.upload_r8(frame.width, frame.height, &frame.y_plane),
+                    renderer.upload_r8g8(frame.chroma_width, frame.chroma_height, &frame.uv_plane),
+                ),
+                FrameDepth::Ten => (
+                    renderer.upload_r16(frame.width, frame.height, &frame.y_plane),
+                    renderer.upload_r16g16(frame.chroma_width, frame.chroma_height, &frame.uv_plane),
+                ),
+            };
             match (y, uv) {
                 (Ok(y), Ok(uv)) => {
                     self.y_tex = Some(y);
@@ -210,6 +223,12 @@ impl VideoState {
     /// `Renderer::draw_video`. `None` until the first frame is decoded.
     pub fn planes(&self) -> Option<(&GpuTexture, &GpuTexture)> {
         Some((self.y_tex.as_ref()?, self.uv_tex.as_ref()?))
+    }
+
+    /// Colour description of the current frame (drives the video shader's colour
+    /// pipeline). `None` until the first frame is decoded.
+    pub fn video_color(&self) -> Option<ColorInfo> {
+        self.color
     }
 
     /// Current playback position in seconds (the smoothed master clock).

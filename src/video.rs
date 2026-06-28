@@ -20,19 +20,56 @@ use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
 use ffmpeg::util::frame::video::Video;
 
-/// A decoded video frame in NV12 (8-bit 4:2:0): a luma plane plus an interleaved
-/// chroma plane, both tightly packed (ffmpeg row stride stripped). The GPU video
-/// shader does the YUV->RGB conversion, so no CPU colour conversion happens here.
+/// Opto-electronic transfer of the source: standard SDR gamma, or one of the two
+/// HDR transfers (PQ / HLG) that need a tone-mapping pass.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Transfer {
+    Sdr,
+    Pq,
+    Hlg,
+}
+
+/// Bit depth of the decoded planes: NV12 (8-bit) vs P010 (10-bit in 16-bit words).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameDepth {
+    Eight,
+    Ten,
+}
+
+/// Colour description of a video stream, used to pick the GPU colour pipeline.
+#[derive(Clone, Copy, Debug)]
+pub struct ColorInfo {
+    pub transfer: Transfer,
+    /// True for BT.2020 primaries (HDR), false for BT.709 (SDR/HD).
+    pub bt2020_primaries: bool,
+    /// True for full-range (JPEG) luma/chroma, false for limited (MPEG/TV) range.
+    pub full_range: bool,
+    /// Source peak luminance in nits (mastering display / maxCLL, or a default).
+    pub peak_nits: f32,
+    /// Target SDR diffuse-white luminance in nits (BT.2408 reference is 203).
+    pub sdr_white_nits: f32,
+}
+
+impl ColorInfo {
+    pub fn is_hdr(&self) -> bool {
+        self.transfer != Transfer::Sdr
+    }
+}
+
+/// A decoded video frame as native YUV 4:2:0 planes — NV12 (8-bit) or P010
+/// (10-bit) — both tightly packed (ffmpeg row stride stripped). The GPU video
+/// shader does the YUV->RGB (and, for HDR, tone-mapping) conversion.
 pub struct VideoFrame {
     pub pts_secs: f64,
     pub width: u32,
     pub height: u32,
     pub chroma_width: u32,
     pub chroma_height: u32,
-    /// Luma plane: `width * height` bytes (one R8 texel per sample).
+    pub depth: FrameDepth,
+    pub color: ColorInfo,
+    /// Luma plane: `width * height * bytes_per_sample`.
     pub y_plane: Vec<u8>,
-    /// Interleaved chroma plane: `chroma_width * chroma_height * 2` bytes
-    /// (one R8G8 texel per (U,V) pair).
+    /// Interleaved chroma plane: `chroma_width * chroma_height * 2 * bytes_per_sample`.
     pub uv_plane: Vec<u8>,
 }
 
@@ -193,6 +230,32 @@ impl Drop for VideoStream {
     }
 }
 
+/// Map the decoder's colour metadata to our [`ColorInfo`]. Peak/white luminance
+/// use sensible HDR defaults (mastering-display / maxCLL side-data parsing is a
+/// later refinement); BT.2408 puts SDR reference white at 203 nits.
+fn detect_color(decoder: &ffmpeg::codec::decoder::Video) -> ColorInfo {
+    use ffmpeg::color::TransferCharacteristic as Trc;
+
+    let transfer = match decoder.color_transfer_characteristic() {
+        Trc::SMPTE2084 => Transfer::Pq,
+        Trc::ARIB_STD_B67 => Transfer::Hlg,
+        _ => Transfer::Sdr,
+    };
+    let bt2020_primaries = matches!(
+        decoder.color_primaries(),
+        ffmpeg::color::Primaries::BT2020
+    );
+    let full_range = matches!(decoder.color_range(), ffmpeg::color::Range::JPEG);
+
+    ColorInfo {
+        transfer,
+        bt2020_primaries,
+        full_range,
+        peak_nits: 1000.0,
+        sdr_white_nits: 203.0,
+    }
+}
+
 fn decode_loop(
     path: PathBuf,
     stream_index: usize,
@@ -208,14 +271,31 @@ fn decode_loop(
         ictx.stream(stream_index).context("stream gone")?.parameters(),
     )?;
     let mut decoder = codec_ctx.decoder().video()?;
-    // Normalise every source format to NV12 (8-bit 4:2:0). This collapses the
-    // wide variety of decoder output formats to a single layout the GPU shader
-    // understands, while keeping the conversion on libswscale's optimised path.
+
+    // Read the stream's colour metadata to decide the conversion target. HDR
+    // content (PQ / HLG transfer) is normalised to 10-bit P010 so bit depth is
+    // preserved into the GPU tone-mapping shader; everything else collapses to
+    // 8-bit NV12. Both keep libswscale on its optimised path.
+    let color = detect_color(&decoder);
+    let (target_fmt, depth, bps) = if color.is_hdr() {
+        (Pixel::P010LE, FrameDepth::Ten, 2usize)
+    } else {
+        (Pixel::NV12, FrameDepth::Eight, 1usize)
+    };
+    log::info!(
+        "Video colour: transfer={:?} bt2020={} full_range={} -> {} ({:?})",
+        color.transfer,
+        color.bt2020_primaries,
+        color.full_range,
+        if color.is_hdr() { "P010/HDR" } else { "NV12/SDR" },
+        depth,
+    );
+
     let mut scaler = Scaler::get(
         src_format,
         width,
         height,
-        Pixel::NV12,
+        target_fmt,
         width,
         height,
         Flags::BILINEAR,
@@ -225,30 +305,31 @@ fn decode_loop(
     let tb_den = time_base.denominator() as f64;
     let pts_to_secs = |pts: i64| -> f64 { pts as f64 * tb_num / tb_den };
 
-    // Pull the two NV12 planes out of the scaled frame, stripping ffmpeg's row
-    // padding so each plane is tightly packed for direct GPU upload.
-    let extract_frame = |nv12: &Video, secs: f64| -> VideoFrame {
-        let w = nv12.width() as usize;
-        let h = nv12.height() as usize;
+    // Pull the two planes out of the scaled frame, stripping ffmpeg's row padding
+    // so each plane is tightly packed for direct GPU upload. `bps` is bytes per
+    // sample (1 for NV12, 2 for P010); the chroma plane interleaves two samples.
+    let extract_frame = move |conv: &Video, secs: f64| -> VideoFrame {
+        let w = conv.width() as usize;
+        let h = conv.height() as usize;
         let cw = w.div_ceil(2);
         let ch = h.div_ceil(2);
 
-        let y_stride = nv12.stride(0);
-        let y_data = nv12.data(0);
-        let mut y_plane = Vec::with_capacity(w * h);
+        let y_stride = conv.stride(0);
+        let y_data = conv.data(0);
+        let y_row = w * bps;
+        let mut y_plane = Vec::with_capacity(y_row * h);
         for row in 0..h {
             let s = row * y_stride;
-            y_plane.extend_from_slice(&y_data[s..s + w]);
+            y_plane.extend_from_slice(&y_data[s..s + y_row]);
         }
 
-        // Interleaved UV: `cw` (U,V) pairs per row => `cw * 2` bytes, `ch` rows.
-        let uv_stride = nv12.stride(1);
-        let uv_data = nv12.data(1);
-        let row_bytes = cw * 2;
-        let mut uv_plane = Vec::with_capacity(row_bytes * ch);
+        let uv_stride = conv.stride(1);
+        let uv_data = conv.data(1);
+        let uv_row = cw * 2 * bps;
+        let mut uv_plane = Vec::with_capacity(uv_row * ch);
         for row in 0..ch {
             let s = row * uv_stride;
-            uv_plane.extend_from_slice(&uv_data[s..s + row_bytes]);
+            uv_plane.extend_from_slice(&uv_data[s..s + uv_row]);
         }
 
         VideoFrame {
@@ -257,6 +338,8 @@ fn decode_loop(
             height: h as u32,
             chroma_width: cw as u32,
             chroma_height: ch as u32,
+            depth,
+            color,
             y_plane,
             uv_plane,
         }
@@ -385,10 +468,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let f = got.expect("a frame should be produced");
-        assert_eq!(f.y_plane.len(), f.width as usize * f.height as usize);
+        let bps = if f.depth == FrameDepth::Ten { 2 } else { 1 };
+        assert_eq!(f.y_plane.len(), f.width as usize * f.height as usize * bps);
         assert_eq!(
             f.uv_plane.len(),
-            f.chroma_width as usize * f.chroma_height as usize * 2
+            f.chroma_width as usize * f.chroma_height as usize * 2 * bps
         );
     }
 }
