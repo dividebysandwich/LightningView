@@ -110,6 +110,12 @@ jobs:
     env:
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
+      # SDL3's vendored cmake build defaults to the runner's macOS SDK (e.g. 15.x),
+      # while rustc links aarch64-apple-darwin at 11.0 — that mismatch makes the
+      # newer Apple linker fail. Read by cmake, cc, and rustc alike, so this pins
+      # the SDL build and the final link to the same deployment target. (Ignored
+      # on Linux/Windows.)
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
 
