@@ -128,6 +128,51 @@ fn draw_seek_bar(r: &mut Renderer, area: Rect, pos_secs: f64, dur_secs: Option<f
     );
 }
 
+// Context-menu geometry.
+const MENU_W: f32 = 240.0;
+const MENU_ROW_H: f32 = 30.0;
+const MENU_PAD: f32 = 5.0;
+const MENU_ITEMS: usize = 3;
+
+/// Compute the context-menu panel rect and its per-row rects, clamped so the
+/// menu stays fully on-screen. Shared by `handle_event` (hit-testing) and
+/// `render` (drawing) so the two never disagree.
+fn context_menu_layout(anchor: Vec2, area: Rect) -> (Rect, [Rect; MENU_ITEMS]) {
+    let h = MENU_ROW_H * MENU_ITEMS as f32 + MENU_PAD * 2.0;
+    let x = anchor.x.min(area.max().x - MENU_W).max(area.min.x);
+    let y = anchor.y.min(area.max().y - h).max(area.min.y);
+    let panel = Rect::xywh(x, y, MENU_W, h);
+    let mut rows = [Rect::xywh(0.0, 0.0, 0.0, 0.0); MENU_ITEMS];
+    for (i, row) in rows.iter_mut().enumerate() {
+        *row = Rect::xywh(
+            x + MENU_PAD,
+            y + MENU_PAD + i as f32 * MENU_ROW_H,
+            MENU_W - MENU_PAD * 2.0,
+            MENU_ROW_H,
+        );
+    }
+    (panel, rows)
+}
+
+/// Compute the delete-dialog panel and its (Cancel, Delete) button rects.
+fn delete_dialog_layout(area: Rect) -> (Rect, Rect, Rect) {
+    let panel_w = (area.width() * 0.6).clamp(320.0, 720.0);
+    let panel_h = 150.0;
+    let panel = Rect::xywh(
+        area.center().x - panel_w / 2.0,
+        area.center().y - panel_h / 2.0,
+        panel_w,
+        panel_h,
+    );
+    let btn_w = 130.0;
+    let btn_h = 36.0;
+    let by = panel.max().y - btn_h - 18.0;
+    let gap = 24.0;
+    let cancel = Rect::xywh(panel.center().x - btn_w - gap / 2.0, by, btn_w, btn_h);
+    let delete = Rect::xywh(panel.center().x + gap / 2.0, by, btn_w, btn_h);
+    (panel, cancel, delete)
+}
+
 pub struct ImageViewerApp {
     image: Option<DisplayableImage>,
     /// Active video playback state. Mutually exclusive with `image`.
@@ -158,6 +203,8 @@ pub struct ImageViewerApp {
     /// Set when a drag/zoom happened this frame; suppresses the bounce physics
     /// for that frame (mirrors the old `is_interacting`).
     interacted: bool,
+    /// When `Some`, the right-click context menu is open, anchored at this point.
+    context_menu: Option<Vec2>,
     should_quit: bool,
 }
 
@@ -190,6 +237,7 @@ impl ImageViewerApp {
             mouse_pos: Vec2::ZERO,
             dragging: false,
             interacted: false,
+            context_menu: None,
             should_quit: false,
         };
         if let Some(path) = path {
@@ -657,9 +705,42 @@ impl ImageViewerApp {
                 self.on_key(*kc, *keymod, renderer);
             }
             Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } => {
-                self.mouse_pos = Vec2::new(*x, *y);
-                if !self.show_delete_confirmation {
+                let p = Vec2::new(*x, *y);
+                self.mouse_pos = p;
+                let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
+                if self.show_delete_confirmation {
+                    // Hit-test the dialog buttons; clicks elsewhere keep it open.
+                    let (_, cancel, delete) = delete_dialog_layout(area);
+                    if delete.contains(p) {
+                        self.perform_delete(renderer);
+                    } else if cancel.contains(p) {
+                        self.show_delete_confirmation = false;
+                    }
+                } else if let Some(anchor) = self.context_menu {
+                    // Hit-test the menu rows; a click outside dismisses it.
+                    let (panel, rows) = context_menu_layout(anchor, area);
+                    if rows[0].contains(p) {
+                        self.is_fullscreen = !self.is_fullscreen;
+                        self.context_menu = None;
+                    } else if rows[1].contains(p) {
+                        self.is_scaled_to_fit = !self.is_scaled_to_fit;
+                        self.context_menu = None;
+                    } else if rows[2].contains(p) {
+                        self.toggle_random_order();
+                        self.context_menu = None;
+                    } else if !panel.contains(p) {
+                        self.context_menu = None;
+                    }
+                } else {
                     self.dragging = true;
+                }
+            }
+            Event::MouseButtonDown { mouse_btn: MouseButton::Right, x, y, .. } => {
+                let p = Vec2::new(*x, *y);
+                self.mouse_pos = p;
+                // Open the context menu (only over image/video, not a modal).
+                if !self.show_delete_confirmation {
+                    self.context_menu = Some(p);
                 }
             }
             Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } => {
@@ -763,13 +844,37 @@ impl ImageViewerApp {
         match kc {
             Keycode::Home => self.first_image(renderer),
             Keycode::End => self.last_image(renderer),
-            Keycode::Escape => self.should_quit = true,
+            // Escape closes the context menu first, otherwise quits.
+            Keycode::Escape => {
+                if self.context_menu.take().is_none() {
+                    self.should_quit = true;
+                }
+            }
             Keycode::F => {
                 self.is_fullscreen = !self.is_fullscreen;
             }
             Keycode::Return => self.is_scaled_to_fit = !self.is_scaled_to_fit,
             Keycode::Delete => self.show_delete_confirmation = true,
             _ => {}
+        }
+    }
+
+    /// Toggle randomized traversal order, preserving the currently-shown image.
+    fn toggle_random_order(&mut self) {
+        self.is_randomized = !self.is_randomized;
+        if self.image_files.is_empty() {
+            return;
+        }
+        let current = self.image_order[self.current_index];
+        if self.is_randomized {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::rng();
+            self.image_order.shuffle(&mut rng);
+        } else {
+            self.image_order = (0..self.image_files.len()).collect();
+        }
+        if let Some(pos) = self.image_order.iter().position(|&i| i == current) {
+            self.current_index = pos;
         }
     }
 
@@ -933,6 +1038,9 @@ impl ImageViewerApp {
         if self.show_delete_confirmation {
             self.render_delete_dialog(renderer, area);
         }
+        if self.context_menu.is_some() {
+            self.render_context_menu(renderer, area);
+        }
 
         renderer.end_frame()
     }
@@ -1021,7 +1129,7 @@ impl ImageViewerApp {
         }
     }
 
-    fn render_delete_dialog(&mut self, renderer: &mut Renderer, area: Rect) {
+    fn render_delete_dialog(&self, renderer: &mut Renderer, area: Rect) {
         let path = self.image_files.get(self.image_order[self.current_index]).cloned();
         let msg = match &path {
             Some(p) => format!("Delete '{}'?", p.display()),
@@ -1030,31 +1138,75 @@ impl ImageViewerApp {
         // Dim the background.
         renderer.fill_rect(area, rgba8(0, 0, 0, 140));
 
-        let panel_w = (area.width() * 0.6).clamp(320.0, 720.0);
-        let panel_h = 130.0;
-        let panel = Rect::xywh(
-            area.center().x - panel_w / 2.0,
-            area.center().y - panel_h / 2.0,
-            panel_w,
-            panel_h,
-        );
+        let (panel, cancel, delete) = delete_dialog_layout(area);
         renderer.fill_rect(panel, rgba8(40, 40, 40, 245));
         renderer.stroke_rect(panel, 1.0, gray(90));
 
         renderer.draw_text(
             &msg,
             16.0,
-            Vec2::new(panel.center().x, panel.min.y + 18.0),
+            Vec2::new(panel.center().x, panel.min.y + 24.0),
             TextAlign::Center,
             WHITE,
         );
+        self.draw_button(renderer, cancel, "Cancel", false);
+        self.draw_button(renderer, delete, "Delete", true);
+    }
+
+    /// Draw a labelled button with a hover highlight (`danger` colours destructive
+    /// actions red). Hit-testing against the same rect lives in `handle_event`.
+    fn draw_button(&self, renderer: &mut Renderer, rect: Rect, label: &str, danger: bool) {
+        let hovered = rect.contains(self.mouse_pos);
+        let fill = match (danger, hovered) {
+            (true, true) => rgba8(190, 70, 70, 255),
+            (true, false) => rgba8(150, 50, 50, 255),
+            (false, true) => rgba8(95, 95, 95, 255),
+            (false, false) => rgba8(70, 70, 70, 255),
+        };
+        renderer.fill_rect(rect, fill);
+        renderer.stroke_rect(rect, 1.0, gray(120));
         renderer.draw_text(
-            "Enter = delete    Esc = cancel",
-            14.0,
-            Vec2::new(panel.center().x, panel.min.y + 70.0),
+            label,
+            15.0,
+            Vec2::new(rect.center().x, rect.center().y - 9.0),
             TextAlign::Center,
-            gray(200),
+            WHITE,
         );
+    }
+
+    fn render_context_menu(&self, renderer: &mut Renderer, area: Rect) {
+        let Some(anchor) = self.context_menu else { return };
+        let (panel, rows) = context_menu_layout(anchor, area);
+        renderer.fill_rect(panel, rgba8(35, 35, 35, 245));
+        renderer.stroke_rect(panel, 1.0, gray(90));
+
+        let items = [
+            ("Fullscreen (F)", self.is_fullscreen),
+            ("Scale to fit (Enter)", self.is_scaled_to_fit),
+            ("Random order", self.is_randomized),
+        ];
+        for (row, (label, checked)) in rows.iter().zip(items.iter()) {
+            if row.contains(self.mouse_pos) {
+                renderer.fill_rect(*row, rgba8(255, 255, 255, 28));
+            }
+            // Checkbox: outlined box, filled when the setting is on.
+            let bs = 16.0;
+            let bx = Rect::xywh(row.min.x + 8.0, row.center().y - bs / 2.0, bs, bs);
+            renderer.stroke_rect(bx, 1.5, gray(200));
+            if *checked {
+                renderer.fill_rect(
+                    Rect::xywh(bx.min.x + 3.0, bx.min.y + 3.0, bs - 6.0, bs - 6.0),
+                    rgba8(120, 180, 255, 255),
+                );
+            }
+            renderer.draw_text(
+                label,
+                15.0,
+                Vec2::new(bx.max().x + 10.0, row.center().y - 9.0),
+                TextAlign::Left,
+                WHITE,
+            );
+        }
     }
 
     // --- Main-loop queries ---------------------------------------------------

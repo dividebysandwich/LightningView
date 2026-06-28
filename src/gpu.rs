@@ -114,8 +114,11 @@ pub enum TextAlign {
 }
 
 pub struct Renderer {
-    window: Window,
-    device: Device,
+    // NOTE: Rust drops struct fields in declaration order. Every GPU resource
+    // below (pipelines, sampler, textures, buffers, cached text textures) holds a
+    // weak ref to the device and only releases itself to the driver while the
+    // device is still alive — so `device` (and the `window` it claimed) must be
+    // declared LAST, after all resources, to avoid leaking them on shutdown.
     pipeline: GraphicsPipeline,
     /// Pipeline for NV12 video frames (samples Y + UV planes, YUV->RGB in shader).
     video_pipeline: GraphicsPipeline,
@@ -141,6 +144,10 @@ pub struct Renderer {
     /// Cache of rasterised single-line strings, keyed by (text, rounded px size).
     text_cache: HashMap<(String, u32), CachedText>,
     frame_counter: u64,
+
+    // Dropped last (see note above).
+    device: Device,
+    window: Window,
 }
 
 struct CachedText {

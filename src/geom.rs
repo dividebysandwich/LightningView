@@ -130,7 +130,6 @@ impl Rect {
 
     /// True if `p` lies within the rectangle (inclusive of the min/max edges).
     /// Used for immediate-mode widget hit-testing (dialogs, context menu).
-    #[allow(dead_code)]
     pub fn contains(&self, p: Vec2) -> bool {
         let max = self.max();
         p.x >= self.min.x && p.x <= max.x && p.y >= self.min.y && p.y <= max.y
