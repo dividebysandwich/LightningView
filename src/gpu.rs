@@ -979,6 +979,11 @@ fn measure_line(font: &fontdue::Font, text: &str, px: f32) -> (u32, u32, f32) {
     };
     let mut width = 0.0f32;
     for ch in text.chars() {
+        // Control chars (newline, tab, …) have no glyph — skip them so they don't
+        // render as `.notdef` tofu boxes. Callers lay out multiple lines.
+        if ch.is_control() {
+            continue;
+        }
         let m = font.metrics(ch, px);
         width += m.advance_width;
     }
@@ -997,6 +1002,9 @@ fn rasterize_line(font: &fontdue::Font, text: &str, px: f32) -> Option<PixelBuf>
 
     let mut pen_x = 0.0f32;
     for ch in text.chars() {
+        if ch.is_control() {
+            continue;
+        }
         let (m, bitmap) = font.rasterize(ch, px);
         let gx = (pen_x + m.xmin as f32).round() as i32;
         // Top of the glyph bitmap relative to the baseline.
@@ -1029,4 +1037,23 @@ fn rasterize_line(font: &fontdue::Font, text: &str, px: f32) -> Option<PixelBuf>
     }
 
     Some(PixelBuf::new(w, h, rgba))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Newlines/control chars must not be laid out as glyphs (the `.notdef`
+    /// "tofu" box) — they should contribute no width. Skips if no system font.
+    #[test]
+    fn control_chars_have_no_glyph_width() {
+        let Some(font) = load_system_font() else {
+            return;
+        };
+        let (w_plain, _, _) = measure_line(&font, "ab", 24.0);
+        let (w_newline, _, _) = measure_line(&font, "a\nb", 24.0);
+        let (w_tab, _, _) = measure_line(&font, "a\tb", 24.0);
+        assert_eq!(w_plain, w_newline, "newline should add no width");
+        assert_eq!(w_plain, w_tab, "tab should add no width");
+    }
 }

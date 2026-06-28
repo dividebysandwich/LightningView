@@ -75,8 +75,16 @@ fn format_time(secs: f64) -> String {
 /// outline so it stays legible over any frame.
 fn draw_subtitle(r: &mut Renderer, area: Rect, text: &str) {
     let size = (area.height() * 0.045).clamp(18.0, 40.0);
-    let pos = Vec2::new(area.center().x, area.max().y - area.height() * 0.05 - size);
-    r.draw_text_outlined(text, size, pos, TextAlign::Center, WHITE);
+    let line_h = size * 1.25;
+    // Subtitles are often multi-line (`\n`-separated); stack the lines so the last
+    // sits at the usual bottom anchor and earlier lines go above it.
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let bottom_y = area.max().y - area.height() * 0.05 - size;
+    let n = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        let y = bottom_y - (n - 1 - i) as f32 * line_h;
+        r.draw_text_outlined(line, size, Vec2::new(area.center().x, y), TextAlign::Center, WHITE);
+    }
 }
 
 /// Draw a transient on-screen status message in the top-left of `area`.
