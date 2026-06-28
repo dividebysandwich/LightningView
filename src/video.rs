@@ -1,7 +1,10 @@
 //! Threaded ffmpeg video decoder. Frames are decoded ahead of time on a worker
 //! thread and queued in PTS order; the UI samples them by the audio clock.
 //! Ported near-verbatim from sparkplayer (sparkplayer-native `video.rs`); the
-//! `frame_to_color_image` helper adapts the RGB24 output to an egui texture.
+//! `frame_to_pixel_buf` helper adapts the RGB24 output for GPU upload.
+//!
+//! Note: this still converts to 8-bit RGB on the CPU (SDR). The HDR phases
+//! replace this with native YUV/P010 plane upload + a shader colour pipeline.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -11,12 +14,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use egui::ColorImage;
 use ffmpeg_next as ffmpeg;
 use ffmpeg::format::Pixel;
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
 use ffmpeg::util::frame::video::Video;
+
+use crate::types::PixelBuf;
 
 /// A decoded video frame in RGB8.
 pub struct VideoFrame {
@@ -26,22 +30,18 @@ pub struct VideoFrame {
     pub data: Vec<u8>,
 }
 
-/// Expand an RGB24 [`VideoFrame`] into an egui RGBA `ColorImage`.
-pub fn frame_to_color_image(frame: &VideoFrame) -> ColorImage {
+/// Expand an RGB24 [`VideoFrame`] into a tightly-packed RGBA8 [`PixelBuf`].
+pub fn frame_to_pixel_buf(frame: &VideoFrame) -> PixelBuf {
     let w = frame.width as usize;
     let h = frame.height as usize;
-    let mut pixels = Vec::with_capacity(w * h);
-    for px in frame.data.chunks_exact(3) {
-        pixels.push(egui::Color32::from_rgb(px[0], px[1], px[2]));
+    let mut rgba = vec![0u8; w * h * 4];
+    for (src, dst) in frame.data.chunks_exact(3).zip(rgba.chunks_exact_mut(4)) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+        dst[3] = 255;
     }
-    // Guard against a truncated buffer (shouldn't happen, but keep the texture
-    // dimensions consistent with the declared size).
-    pixels.resize(w * h, egui::Color32::BLACK);
-    ColorImage {
-        size: [w, h],
-        pixels,
-        source_size: egui::Vec2::new(w as f32, h as f32),
-    }
+    PixelBuf::new(frame.width, frame.height, rgba)
 }
 
 struct SharedQueue {

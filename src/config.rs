@@ -5,7 +5,7 @@
 // `%APPDATA%\lightningview\config.toml` on Windows). When no file exists yet a
 // commented default is written so users have something to edit.
 
-use eframe::egui;
+use sdl3::keyboard::Keycode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,11 +22,11 @@ pub enum KeyPair {
 }
 
 impl KeyPair {
-    /// The (backward, forward) egui keys this pair maps to.
-    pub fn keys(self) -> (egui::Key, egui::Key) {
+    /// The (backward, forward) SDL keycodes this pair maps to.
+    pub fn keys(self) -> (Keycode, Keycode) {
         match self {
-            KeyPair::Arrows => (egui::Key::ArrowLeft, egui::Key::ArrowRight),
-            KeyPair::PageUpDown => (egui::Key::PageUp, egui::Key::PageDown),
+            KeyPair::Arrows => (Keycode::Left, Keycode::Right),
+            KeyPair::PageUpDown => (Keycode::PageUp, Keycode::PageDown),
         }
     }
 }

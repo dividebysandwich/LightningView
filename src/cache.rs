@@ -1,5 +1,4 @@
 // --- Preload Cache ---
-use egui::ColorImage;
 use image::DynamicImage;
 use std::{
     env, fs,
@@ -8,7 +7,7 @@ use std::{
 };
 
 use crate::decode::fast_resize_rgba;
-use crate::types::LoadedImage;
+use crate::types::{LoadedImage, PixelBuf};
 
 const PRELOAD_CACHE_WIDTH: u32 = 1920;
 const PRELOAD_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
@@ -89,10 +88,7 @@ pub fn load_preload_cache(path: &Path) -> Option<LoadedImage> {
     match qoi::decode_to_vec(&bytes) {
         Ok((header, pixels)) => {
             log::debug!("Hit preload cache for {}", path.display());
-            let image = ColorImage::from_rgba_unmultiplied(
-                [header.width as _, header.height as _],
-                &pixels,
-            );
+            let image = PixelBuf::new(header.width, header.height, pixels);
             Some(LoadedImage::Static(image))
         }
         Err(e) => {

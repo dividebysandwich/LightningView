@@ -31,12 +31,14 @@
 
           nativeBuildInputs = with pkgs; [
             pkg-config
-            # Needed by image/jxl-oxide native helpers and rawler.
+            # cmake builds the vendored SDL3 (sdl3 "build-from-source") plus the
+            # image/jxl-oxide native helpers and rawler.
             cmake
+            # glslc compiles the SDL_GPU shaders to SPIR-V in build.rs.
+            shaderc
           ];
 
           buildInputs = with pkgs; [
-            gtk3
             libxkbcommon
             openssl
             wayland
@@ -45,9 +47,11 @@
             xorg.libXcursor
             xorg.libXi
             xorg.libXrandr
+            # SDL3's Vulkan GPU backend loads the loader at runtime.
+            vulkan-loader
           ];
 
-          # eframe loads Wayland/X11 libs at runtime via dlopen.
+          # SDL3 dlopens its Wayland/X11/Vulkan backends at runtime.
           postFixup = ''
             patchelf \
               --add-rpath "${pkgs.lib.makeLibraryPath (with pkgs; [
@@ -57,6 +61,7 @@
                 xorg.libXcursor
                 xorg.libXi
                 xorg.libXrandr
+                vulkan-loader
               ])}" \
               $out/bin/lightningview
           '';

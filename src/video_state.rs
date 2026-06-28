@@ -8,11 +8,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use egui::{Context, TextureHandle, TextureOptions};
 
 use crate::audio::AudioPlayer;
+use crate::gpu::{GpuTexture, Renderer};
 use crate::subtitles::{self, SubtitleSet};
-use crate::video::{frame_to_color_image, VideoStream};
+use crate::video::{frame_to_pixel_buf, VideoStream};
 
 const OSD_DURATION: Duration = Duration::from_millis(2000);
 
@@ -29,7 +29,7 @@ pub struct VideoState {
     /// playable audio stream). Otherwise the wall clock below drives playback.
     use_audio_clock: bool,
     subtitles: SubtitleSet,
-    texture: Option<TextureHandle>,
+    texture: Option<GpuTexture>,
     pub frame_size: [usize; 2],
     duration: Option<Duration>,
     av_offset_secs: f64,
@@ -55,7 +55,7 @@ pub struct VideoState {
 }
 
 impl VideoState {
-    pub fn open(path: &Path, _ctx: &Context) -> Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         let stream = VideoStream::open(path)?;
         let frame_size = [stream.width as usize, stream.height as usize];
         let duration = stream.duration;
@@ -165,17 +165,16 @@ impl VideoState {
 
     /// Pull the frame for the current clock and upload it; refresh the active
     /// subtitle line. Called once per UI frame.
-    pub fn tick(&mut self, ctx: &Context) {
+    pub fn tick(&mut self, renderer: &Renderer) {
         let clock = self.advance_clock();
         if let Some(frame) = self.stream.frame_at(clock) {
             self.frame_size = [frame.width as usize, frame.height as usize];
-            let img = frame_to_color_image(&frame);
-            match &mut self.texture {
-                Some(tex) => tex.set(img, TextureOptions::LINEAR),
-                None => {
-                    self.texture =
-                        Some(ctx.load_texture("video_frame", img, TextureOptions::LINEAR));
-                }
+            let buf = frame_to_pixel_buf(&frame);
+            // Each new frame uploads a fresh texture; the previous one is freed
+            // when this assignment drops it.
+            match renderer.upload_texture(&buf) {
+                Ok(tex) => self.texture = Some(tex),
+                Err(e) => log::warn!("Failed to upload video frame: {e}"),
             }
         }
         self.current_subtitle = self
@@ -183,7 +182,7 @@ impl VideoState {
             .and_then(|i| self.subtitles.cue_at(i, clock));
     }
 
-    pub fn texture(&self) -> Option<&TextureHandle> {
+    pub fn texture(&self) -> Option<&GpuTexture> {
         self.texture.as_ref()
     }
 
