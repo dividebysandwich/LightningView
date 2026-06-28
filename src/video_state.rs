@@ -295,6 +295,11 @@ impl VideoState {
         self.controls_shown_at.elapsed() < CONTROLS_DURATION
     }
 
+    /// Re-show the controls (e.g. while the user is dragging the seek-bar marker).
+    pub fn bump_controls(&mut self) {
+        self.controls_shown_at = Instant::now();
+    }
+
     fn set_osd(&mut self, text: String) {
         self.osd = Some((text, Instant::now()));
         // Any action that surfaces an OSD message is an interaction, so re-show
@@ -353,33 +358,41 @@ impl VideoState {
         self.last_clock_tick = None;
     }
 
-    pub fn seek_relative(&mut self, delta_secs: f64) {
+    /// Current playback position in seconds (raw clock; frozen at the target
+    /// while resyncing). Used as the anchor for relative seeks.
+    fn current_pos_secs(&self) -> f64 {
+        if self.use_audio_clock {
+            self.audio
+                .as_ref()
+                .map(|a| a.position().as_secs_f64())
+                .unwrap_or(0.0)
+        } else {
+            self.raw_clock_secs()
+        }
+    }
+
+    /// Seek to an absolute time (seconds), clamping into range, and enter the
+    /// post-seek hold. Shared by relative seeks and the seek-bar scrub.
+    fn seek_to_absolute(&mut self, target: f64) {
         let max = self
             .duration
             .map(|d| (d.as_secs_f64() - 0.2).max(0.0))
             .unwrap_or(f64::MAX);
+        let target = target.clamp(0.0, max);
 
-        let target = if self.use_audio_clock {
-            let pos = self
-                .audio
-                .as_ref()
-                .map(|a| a.position().as_secs_f64())
-                .unwrap_or(0.0);
-            let target = (pos + delta_secs).clamp(0.0, max);
-            self.stream.seek(Duration::from_secs_f64(target));
+        self.stream.seek(Duration::from_secs_f64(target));
+        if self.use_audio_clock {
             if let Some(a) = self.audio.as_mut() {
-                let _ = a.seek_relative(delta_secs, self.duration);
+                let _ = a.seek_to_secs(target);
             }
-            target
-        } else {
-            let target = (self.raw_clock_secs() + delta_secs).clamp(0.0, max);
-            self.stream.seek(Duration::from_secs_f64(target));
-            target
-        };
-
+        }
         // Hold the clock + audio at the target until the decoder produces the
         // target frame, then both resume together (see begin/finish_resync).
         self.begin_resync(target);
+    }
+
+    pub fn seek_relative(&mut self, delta_secs: f64) {
+        self.seek_to_absolute(self.current_pos_secs() + delta_secs);
 
         let sign = if delta_secs < 0.0 { "\u{2212}" } else { "+" };
         let mag = delta_secs.abs() as i64;
@@ -389,6 +402,15 @@ impl VideoState {
             format!("{mag}s")
         };
         self.set_osd(format!("{sign}{label}"));
+    }
+
+    /// Seek to a fraction (0..1) of the duration — used by the seek-bar marker.
+    pub fn seek_to_fraction(&mut self, frac: f64) {
+        let Some(d) = self.duration else { return };
+        let target = frac.clamp(0.0, 1.0) * d.as_secs_f64();
+        self.seek_to_absolute(target);
+        let s = target as i64;
+        self.set_osd(format!("{}:{:02}", s / 60, s % 60));
     }
 
     pub fn cycle_audio_track(&mut self) {

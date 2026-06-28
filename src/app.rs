@@ -91,39 +91,84 @@ fn draw_osd(r: &mut Renderer, area: Rect, text: &str) {
 
 /// Draw a graphical seek/progress bar near the bottom of `area`, with the
 /// current position and total duration.
-fn draw_seek_bar(r: &mut Renderer, area: Rect, pos_secs: f64, dur_secs: Option<f64>) {
+/// Geometry of the seek bar within `area`, shared by drawing and mouse hit-testing.
+struct SeekBarGeom {
+    left: f32,
+    right: f32,
+    track_y: f32,
+    track_h: f32,
+    /// Generous clickable band around the thin track.
+    hit: Rect,
+}
+
+fn seek_bar_geom(area: Rect) -> Option<SeekBarGeom> {
     let margin = (area.width() * 0.05).clamp(16.0, 120.0);
     let left = area.min.x + margin;
     let right = area.max().x - margin;
     if right <= left {
-        return;
+        return None;
     }
     let track_y = area.max().y - 28.0;
     let track_h = 6.0;
+    let hit = Rect::from_min_max(
+        Vec2::new(left - 8.0, track_y - 12.0),
+        Vec2::new(right + 8.0, track_y + track_h + 14.0),
+    );
+    Some(SeekBarGeom { left, right, track_y, track_h, hit })
+}
 
+/// Fraction (0..1) along the seek bar for a given screen x.
+fn seek_bar_frac_at(g: &SeekBarGeom, x: f32) -> f32 {
+    ((x - g.left) / (g.right - g.left)).clamp(0.0, 1.0)
+}
+
+/// Draw the seek/progress bar. While the user is scrubbing, `scrub_frac` overrides
+/// the marker position (a live preview) and the time label shows the scrub target.
+fn draw_seek_bar(
+    r: &mut Renderer,
+    area: Rect,
+    pos_secs: f64,
+    dur_secs: Option<f64>,
+    scrub_frac: Option<f32>,
+) {
+    let Some(g) = seek_bar_geom(area) else {
+        return;
+    };
+
+    // The fraction (and time) we display: the scrub target if dragging, else the
+    // live playback position.
+    let display_secs = match (scrub_frac, dur_secs) {
+        (Some(f), Some(d)) => f as f64 * d,
+        _ => pos_secs,
+    };
     let label = match dur_secs {
-        Some(d) => format!("{} / {}", format_time(pos_secs), format_time(d)),
-        None => format_time(pos_secs),
+        Some(d) => format!("{} / {}", format_time(display_secs), format_time(d)),
+        None => format_time(display_secs),
     };
     r.draw_text(
         &label,
         14.0,
-        Vec2::new(right, track_y - track_h - 18.0),
+        Vec2::new(g.right, g.track_y - g.track_h - 18.0),
         TextAlign::Right,
         WHITE,
     );
 
-    let Some(dur) = dur_secs.filter(|d| *d > 0.0) else {
-        return;
+    let frac = match scrub_frac {
+        Some(f) => f,
+        None => match dur_secs.filter(|d| *d > 0.0) {
+            Some(d) => (pos_secs / d).clamp(0.0, 1.0) as f32,
+            None => return, // unknown duration and not scrubbing: label only
+        },
     };
-    let frac = (pos_secs / dur).clamp(0.0, 1.0) as f32;
+
     // Background track, elapsed fill, then a playhead knob.
-    r.fill_rect(Rect::xywh(left, track_y, right - left, track_h), rgba8(0, 0, 0, 160));
-    let fill_w = (right - left) * frac;
-    r.fill_rect(Rect::xywh(left, track_y, fill_w, track_h), gray(230));
-    let knob = track_h * 2.0;
+    r.fill_rect(Rect::xywh(g.left, g.track_y, g.right - g.left, g.track_h), rgba8(0, 0, 0, 160));
+    let fill_w = (g.right - g.left) * frac;
+    r.fill_rect(Rect::xywh(g.left, g.track_y, fill_w, g.track_h), gray(230));
+    // The knob grows a little while scrubbing so it's easy to see where you'll land.
+    let knob = if scrub_frac.is_some() { g.track_h * 3.0 } else { g.track_h * 2.0 };
     r.fill_rect(
-        Rect::xywh(left + fill_w - knob / 2.0, track_y + track_h / 2.0 - knob / 2.0, knob, knob),
+        Rect::xywh(g.left + fill_w - knob / 2.0, g.track_y + g.track_h / 2.0 - knob / 2.0, knob, knob),
         WHITE,
     );
 }
@@ -205,6 +250,10 @@ pub struct ImageViewerApp {
     interacted: bool,
     /// When `Some`, the right-click context menu is open, anchored at this point.
     context_menu: Option<Vec2>,
+    /// True while dragging the seek-bar marker; `scrub_frac` is the live target
+    /// fraction, committed as a seek on mouse-up.
+    scrubbing: bool,
+    scrub_frac: f32,
     should_quit: bool,
 }
 
@@ -238,6 +287,8 @@ impl ImageViewerApp {
             dragging: false,
             interacted: false,
             context_menu: None,
+            scrubbing: false,
+            scrub_frac: 0.0,
             should_quit: false,
         };
         if let Some(path) = path {
@@ -696,6 +747,32 @@ impl ImageViewerApp {
         }
     }
 
+    /// If the seek bar is currently visible and `p` lands on its clickable band,
+    /// begin scrubbing. Returns whether a scrub started (so the left-click handler
+    /// skips the image-pan path).
+    fn try_start_scrub(&mut self, p: Vec2, area: Rect) -> bool {
+        let visible = self
+            .video
+            .as_ref()
+            .map(|v| v.controls_visible() && v.duration_secs().is_some())
+            .unwrap_or(false);
+        if !visible {
+            return false;
+        }
+        let Some(g) = seek_bar_geom(area) else {
+            return false;
+        };
+        if !g.hit.contains(p) {
+            return false;
+        }
+        self.scrubbing = true;
+        self.scrub_frac = seek_bar_frac_at(&g, p.x);
+        if let Some(v) = &mut self.video {
+            v.bump_controls();
+        }
+        true
+    }
+
     // --- Event handling ------------------------------------------------------
 
     pub fn handle_event(&mut self, event: &Event, renderer: &mut Renderer) {
@@ -731,6 +808,8 @@ impl ImageViewerApp {
                     } else if !panel.contains(p) {
                         self.context_menu = None;
                     }
+                } else if self.try_start_scrub(p, area) {
+                    // Grabbed the seek-bar marker; scrubbing handled on motion/up.
                 } else {
                     self.dragging = true;
                 }
@@ -744,11 +823,30 @@ impl ImageViewerApp {
                 }
             }
             Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } => {
+                if self.scrubbing {
+                    // Commit the seek to the marker's final position.
+                    self.scrubbing = false;
+                    let frac = self.scrub_frac;
+                    if let Some(v) = &mut self.video {
+                        v.seek_to_fraction(frac as f64);
+                    }
+                }
                 self.dragging = false;
             }
             Event::MouseMotion { x, y, xrel, yrel, .. } => {
-                self.mouse_pos = Vec2::new(*x, *y);
-                if self.dragging && self.image.is_some() {
+                let p = Vec2::new(*x, *y);
+                self.mouse_pos = p;
+                // Moving the mouse over a video re-shows the HUD, so the seek bar
+                // is reachable (standard media-player behaviour).
+                if let Some(v) = &mut self.video {
+                    v.bump_controls();
+                }
+                if self.scrubbing {
+                    let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
+                    if let Some(g) = seek_bar_geom(area) {
+                        self.scrub_frac = seek_bar_frac_at(&g, p.x);
+                    }
+                } else if self.dragging && self.image.is_some() {
                     let delta = Vec2::new(*xrel, *yrel);
                     self.offset += delta;
                     // Smooth momentum over the recent gesture.
@@ -1044,9 +1142,11 @@ impl ImageViewerApp {
                 draw_osd(renderer, area, &osd);
             }
             // The seek bar / time HUD auto-hides a few seconds after the last
-            // interaction and reappears on seek / pause / resume.
-            if video.controls_visible() {
-                draw_seek_bar(renderer, area, video.position_secs(), video.duration_secs());
+            // interaction and reappears on seek / pause / resume. While scrubbing
+            // it stays up and previews the marker at the drag position.
+            if video.controls_visible() || self.scrubbing {
+                let scrub = self.scrubbing.then_some(self.scrub_frac);
+                draw_seek_bar(renderer, area, video.position_secs(), video.duration_secs(), scrub);
             }
         } else if self.image.is_some() {
             self.render_image(renderer, area);
@@ -1256,7 +1356,10 @@ impl ImageViewerApp {
                 return true;
             }
         }
-        self.full_res_pending || self.dragging || self.velocity.length_sq() > 0.01
+        self.full_res_pending
+            || self.dragging
+            || self.scrubbing
+            || self.velocity.length_sq() > 0.01
     }
 
     pub fn quit_requested(&self) -> bool {
