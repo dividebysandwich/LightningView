@@ -880,8 +880,19 @@ impl ImageViewerApp {
 
     // --- Per-frame update ----------------------------------------------------
 
-    pub fn update(&mut self, renderer: &Renderer) {
+    pub fn update(&mut self, renderer: &mut Renderer) {
         self.check_pending_load(renderer);
+
+        // Engage HDR passthrough when HDR video plays on an HDR-capable display,
+        // and drop back to SDR tone-mapping otherwise (incl. moving to an SDR
+        // monitor). Re-evaluated every frame; reconfiguration is rare.
+        let content_is_hdr = self
+            .video
+            .as_ref()
+            .and_then(|v| v.video_color())
+            .map(|c| c.is_hdr())
+            .unwrap_or(false);
+        renderer.update_hdr_output(content_is_hdr);
 
         let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
 

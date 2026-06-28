@@ -108,7 +108,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             break 'running;
         }
 
-        app.update(&renderer);
+        app.update(&mut renderer);
         if let Err(e) = app.render(&mut renderer) {
             log::error!("render error: {e}");
         }

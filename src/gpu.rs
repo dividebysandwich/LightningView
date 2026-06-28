@@ -20,9 +20,9 @@ use sdl3::gpu::{
     BlendFactor, BlendOp, Buffer, BufferBinding, BufferRegion, BufferUsageFlags,
     ColorTargetBlendState, ColorTargetDescription, ColorTargetInfo, Device, Filter,
     GraphicsPipeline, GraphicsPipelineTargetInfo, LoadOp, PresentMode, PrimitiveType, Sampler,
-    SamplerAddressMode, SamplerCreateInfo, ShaderFormat, ShaderStage, StoreOp, Texture,
-    TextureCreateInfo, TextureRegion, TextureSamplerBinding, TextureTransferInfo, TextureType,
-    TextureUsage, TransferBufferLocation, TransferBufferUsage, VertexAttribute,
+    SamplerAddressMode, SamplerCreateInfo, ShaderFormat, ShaderStage, StoreOp, SwapchainComposition,
+    Texture, TextureCreateInfo, TextureRegion, TextureSamplerBinding, TextureTransferInfo,
+    TextureType, TextureUsage, TransferBufferLocation, TransferBufferUsage, VertexAttribute,
     VertexBufferDescription, VertexElementFormat, VertexInputRate, VertexInputState,
 };
 use sdl3::pixels::Color;
@@ -110,21 +110,24 @@ pub struct VideoColorParams {
     pub sdr_white_nits: f32,
 }
 
+/// Reference SDR diffuse-white luminance (BT.2408) used both as the HDR→SDR
+/// tone-map target and as the level the SDR UI sits at on an HDR swapchain.
+const DISPLAY_SDR_WHITE_NITS: f32 = 203.0;
+
 /// std140-compatible layout pushed as the video fragment uniform (two vec4s).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VideoUniforms {
-    mode: [i32; 4], // transfer, bt2020, full_range, unused
-    lum: [f32; 4],  // peak_nits, sdr_white_nits, unused, unused
+    mode: [i32; 4], // transfer, bt2020, full_range, output_mode
+    lum: [f32; 4],  // src_peak_nits, sdr_tonemap_white, display_sdr_white, unused
 }
 
-impl From<VideoColorParams> for VideoUniforms {
-    fn from(p: VideoColorParams) -> Self {
-        VideoUniforms {
-            mode: [p.transfer, p.bt2020 as i32, p.full_range as i32, 0],
-            lum: [p.peak_nits, p.sdr_white_nits, 0.0, 0.0],
-        }
-    }
+/// std140-compatible layout pushed as the overlay (quad) fragment uniform.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct QuadUniforms {
+    mode: [i32; 4], // output_mode, unused...
+    lum: [f32; 4],  // display_sdr_white, unused...
 }
 
 /// The current frame's video quad, drawn before the overlay batch using the
@@ -133,7 +136,7 @@ struct VideoDraw {
     y: Texture<'static>,
     uv: Texture<'static>,
     first: u32,
-    uniforms: VideoUniforms,
+    params: VideoColorParams,
 }
 
 /// Horizontal text anchor for `draw_text`.
@@ -157,6 +160,15 @@ pub struct Renderer {
     /// 1x1 opaque white texture used to draw solid-colour rects.
     white: GpuTexture,
     clear_color: Color,
+    /// Active swapchain composition (SDR vs an HDR mode). Drives the shader
+    /// output encoding; changing it rebuilds the pipelines for the new format.
+    composition: SwapchainComposition,
+    /// Last-logged HDR capability tuple (display_hdr, hdr10_ok, scrgb_ok), so we
+    /// report capability changes once instead of every frame.
+    hdr_diag: Option<(bool, bool, bool)>,
+    /// `LV_FORCE_HDR` test override: when set, forces this composition for HDR
+    /// content regardless of detected display capability.
+    force_hdr: Option<SwapchainComposition>,
 
     // Per-frame geometry, rebuilt each frame.
     verts: Vec<Vertex>,
@@ -216,7 +228,7 @@ impl Renderer {
             sdl3::gpu::SwapchainComposition::Sdr,
         );
 
-        let pipeline = build_pipeline(&device, &window, QUAD_FRAG_SPV, 1, 0)?;
+        let pipeline = build_pipeline(&device, &window, QUAD_FRAG_SPV, 1, 1)?;
         let video_pipeline = build_pipeline(&device, &window, VIDEO_FRAG_SPV, 2, 1)?;
 
         let sampler = device
@@ -233,6 +245,12 @@ impl Renderer {
         // 1x1 opaque white texture, used to draw solid-colour rects/outlines.
         let white = upload_rgba(&device, 1, 1, &[255, 255, 255, 255])?;
 
+        log_displays();
+        let force_hdr = forced_hdr_composition();
+        if let Some(c) = force_hdr {
+            log::info!("LV_FORCE_HDR set: forcing {c:?} for HDR content.");
+        }
+
         Ok(Self {
             window,
             device,
@@ -241,6 +259,9 @@ impl Renderer {
             sampler,
             white,
             clear_color: Color::RGB(20, 20, 20),
+            composition: SwapchainComposition::Sdr,
+            hdr_diag: None,
+            force_hdr,
             verts: Vec::new(),
             cmds: Vec::new(),
             video_draw: None,
@@ -263,6 +284,107 @@ impl Renderer {
     pub fn drawable_size(&self) -> Vec2 {
         let (w, h) = self.window.size_in_pixels();
         Vec2::new(w as f32, h as f32)
+    }
+
+    /// Shader output-encoding mode for the active swapchain composition:
+    /// 0 = SDR sRGB, 1 = HDR10 PQ (BT.2020), 2 = scRGB extended-linear.
+    fn output_mode(&self) -> i32 {
+        match self.composition {
+            SwapchainComposition::Hdr10St2084 => 1,
+            SwapchainComposition::HdrExtendedLinear => 2,
+            _ => 0,
+        }
+    }
+
+    /// Choose the swapchain composition for the current display + content, and
+    /// reconfigure if it changed. Called every frame: HDR engages only while HDR
+    /// content plays on an HDR-capable display, and (because the window's HDR
+    /// state is re-read each call) it follows the window across a multi-monitor
+    /// setup — dropping back to SDR tone-mapping on a non-HDR screen.
+    pub fn update_hdr_output(&mut self, content_is_hdr: bool) {
+        let hdr_display = window_hdr_enabled(&self.window);
+        let (sup_hdr10, sup_scrgb) = if content_is_hdr && hdr_display {
+            (
+                supports_composition(&self.device, &self.window, SwapchainComposition::Hdr10St2084),
+                supports_composition(
+                    &self.device,
+                    &self.window,
+                    SwapchainComposition::HdrExtendedLinear,
+                ),
+            )
+        } else {
+            (false, false)
+        };
+
+        // Report the capability picture once per change while HDR content plays,
+        // so it's clear whether passthrough is available on the current monitor.
+        if content_is_hdr {
+            let diag = (hdr_display, sup_hdr10, sup_scrgb);
+            if self.hdr_diag != Some(diag) {
+                self.hdr_diag = Some(diag);
+                log::info!(
+                    "HDR content: display_hdr={hdr_display} hdr10_supported={sup_hdr10} \
+                     scrgb_supported={sup_scrgb}"
+                );
+            }
+        } else {
+            self.hdr_diag = None;
+        }
+
+        let desired = match self.force_hdr {
+            // Test override: force the requested composition for HDR content.
+            Some(forced) if content_is_hdr => forced,
+            _ if sup_hdr10 => SwapchainComposition::Hdr10St2084,
+            _ if sup_scrgb => SwapchainComposition::HdrExtendedLinear,
+            _ => SwapchainComposition::Sdr,
+        };
+
+        if desired != self.composition {
+            self.reconfigure_swapchain(desired);
+        }
+    }
+
+    /// Switch the swapchain composition and rebuild the pipelines to match the
+    /// new colour-target format. Falls back to SDR on any failure.
+    fn reconfigure_swapchain(&mut self, comp: SwapchainComposition) {
+        if let Err(e) =
+            self.device
+                .set_swapchain_parameters(&self.window, PresentMode::Vsync, comp)
+        {
+            log::warn!("Could not set swapchain composition {comp:?}: {e}");
+            if comp != SwapchainComposition::Sdr {
+                self.reconfigure_swapchain(SwapchainComposition::Sdr);
+            }
+            return;
+        }
+
+        // The swapchain texture format changes with composition (e.g. R10G10B10A2
+        // for HDR10, RGBA16F for scRGB), so the pipelines must be rebuilt to match.
+        let quad = build_pipeline(&self.device, &self.window, QUAD_FRAG_SPV, 1, 1);
+        let video = build_pipeline(&self.device, &self.window, VIDEO_FRAG_SPV, 2, 1);
+        match (quad, video) {
+            (Ok(q), Ok(v)) => {
+                self.pipeline = q;
+                self.video_pipeline = v;
+                self.composition = comp;
+                log::info!(
+                    "Swapchain composition -> {comp:?} (output mode {})",
+                    self.output_mode()
+                );
+            }
+            (q, v) => {
+                log::error!(
+                    "Failed to rebuild pipelines for {comp:?}: {:?} / {:?}; reverting.",
+                    q.err(),
+                    v.err()
+                );
+                let _ = self.device.set_swapchain_parameters(
+                    &self.window,
+                    PresentMode::Vsync,
+                    self.composition,
+                );
+            }
+        }
     }
 
     pub fn set_fullscreen(&mut self, fullscreen: bool) {
@@ -344,7 +466,7 @@ impl Renderer {
             y: y.tex.clone(),
             uv: uv.tex.clone(),
             first,
-            uniforms: params.into(),
+            params,
         });
     }
 
@@ -456,6 +578,28 @@ impl Renderer {
         let verts = std::mem::take(&mut self.verts);
         let cmds = std::mem::take(&mut self.cmds);
         let video_draw = self.video_draw.take();
+        let output_mode = self.output_mode();
+        // Overlay (image/text/rect) uniform: tells the quad shader how to encode
+        // sRGB UI for the active swapchain.
+        let quad_uniforms = QuadUniforms {
+            mode: [output_mode, 0, 0, 0],
+            lum: [DISPLAY_SDR_WHITE_NITS, 0.0, 0.0, 0.0],
+        };
+        // Video uniform combines the frame's colour params with the output mode.
+        let video_uniforms = video_draw.as_ref().map(|vd| VideoUniforms {
+            mode: [
+                vd.params.transfer,
+                vd.params.bt2020 as i32,
+                vd.params.full_range as i32,
+                output_mode,
+            ],
+            lum: [
+                vd.params.peak_nits,
+                vd.params.sdr_white_nits,
+                DISPLAY_SDR_WHITE_NITS,
+                0.0,
+            ],
+        });
         // Evict text-cache entries unused for a while to bound memory.
         let fc = self.frame_counter;
         self.text_cache.retain(|_, c| fc.saturating_sub(c.last_used) < 240);
@@ -514,9 +658,9 @@ impl Renderer {
                     );
 
                     // Video frame first (beneath the overlays), via the YUV pipeline.
-                    if let Some(vd) = &video_draw {
+                    if let (Some(vd), Some(vu)) = (&video_draw, &video_uniforms) {
                         pass.bind_graphics_pipeline(&self.video_pipeline);
-                        cmd.push_fragment_uniform_data(0, &vd.uniforms);
+                        cmd.push_fragment_uniform_data(0, vu);
                         pass.bind_fragment_samplers(
                             0,
                             &[
@@ -533,6 +677,7 @@ impl Renderer {
 
                     // Then the overlay batch (images, text, rects) via the quad pipeline.
                     pass.bind_graphics_pipeline(&self.pipeline);
+                    cmd.push_fragment_uniform_data(0, &quad_uniforms);
                     for c in &cmds {
                         pass.bind_fragment_samplers(
                             0,
@@ -581,6 +726,71 @@ impl Renderer {
 
 fn full_uv() -> Rect {
     Rect::from_min_max(Vec2::ZERO, Vec2::new(1.0, 1.0))
+}
+
+/// True if the display the window currently occupies has HDR enabled. Re-read
+/// each frame so moving the window between monitors is picked up automatically.
+fn window_hdr_enabled(window: &Window) -> bool {
+    unsafe {
+        let props = sdl3::sys::video::SDL_GetWindowProperties(window.raw());
+        sdl3::sys::properties::SDL_GetBooleanProperty(
+            props,
+            sdl3::sys::video::SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
+            false,
+        )
+    }
+}
+
+/// Whether the GPU device + the window's current display support presenting in
+/// the given swapchain composition.
+fn supports_composition(device: &Device, window: &Window, comp: SwapchainComposition) -> bool {
+    unsafe {
+        sdl3::sys::gpu::SDL_WindowSupportsGPUSwapchainComposition(
+            device.raw(),
+            window.raw(),
+            sdl3::sys::gpu::SDL_GPUSwapchainComposition(comp as i32),
+        )
+    }
+}
+
+/// Log each connected display and whether SDL reports HDR enabled on it — handy
+/// for diagnosing which monitor in a multi-screen setup supports HDR passthrough.
+fn log_displays() {
+    unsafe {
+        let mut count: i32 = 0;
+        let ids = sdl3::sys::video::SDL_GetDisplays(&mut count);
+        if ids.is_null() {
+            return;
+        }
+        for i in 0..count as isize {
+            let id = *ids.offset(i);
+            let props = sdl3::sys::video::SDL_GetDisplayProperties(id);
+            let hdr = sdl3::sys::properties::SDL_GetBooleanProperty(
+                props,
+                sdl3::sys::video::SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN,
+                false,
+            );
+            let name_ptr = sdl3::sys::video::SDL_GetDisplayName(id);
+            let name = if name_ptr.is_null() {
+                String::from("?")
+            } else {
+                std::ffi::CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
+            };
+            log::info!("Display {}: \"{name}\" hdr_enabled={hdr}", id.0);
+        }
+        sdl3::sys::stdinc::SDL_free(ids as *mut std::ffi::c_void);
+    }
+}
+
+/// Read the `LV_FORCE_HDR` test override: forces a swapchain composition for HDR
+/// content regardless of detected display capability. Useful for validating the
+/// passthrough render path on an HDR screen when auto-detection is unavailable.
+fn forced_hdr_composition() -> Option<SwapchainComposition> {
+    match std::env::var("LV_FORCE_HDR").ok()?.to_lowercase().as_str() {
+        "hdr10" | "pq" | "1" => Some(SwapchainComposition::Hdr10St2084),
+        "scrgb" | "linear" | "2" => Some(SwapchainComposition::HdrExtendedLinear),
+        _ => None,
+    }
 }
 
 /// Create a GPU texture and upload tightly-packed RGBA8 bytes into it.

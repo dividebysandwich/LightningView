@@ -21,9 +21,10 @@ layout(set = 2, binding = 1) uniform sampler2D u_uv;  // chroma (R8G8 or R16G16)
 
 layout(set = 3, binding = 0) uniform Params {
     // x = transfer (0 SDR, 1 PQ, 2 HLG), y = BT.2020 primaries (0/1),
-    // z = full range (0/1), w = unused.
+    // z = full range (0/1), w = output mode (0 SDR tone-map, 1 HDR10 PQ, 2 scRGB).
     ivec4 mode;
-    // x = source peak luminance (nits), y = SDR diffuse white (nits).
+    // x = source peak luminance (nits), y = SDR tone-map white (nits),
+    // z = display SDR-white level (nits, for HDR output), w = unused.
     vec4 lum;
 } u;
 
@@ -59,6 +60,16 @@ vec3 srgb_oetf(vec3 c) {
     vec3 lo = 12.92 * c;
     vec3 hi = 1.055 * pow(max(c, 0.0), vec3(1.0 / 2.4)) - 0.055;
     return mix(lo, hi, step(vec3(0.0031308), c));
+}
+
+vec3 pq_oetf(vec3 l) { // l normalised so 1.0 == 10000 nits
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    vec3 lm = pow(max(l, 0.0), vec3(m1));
+    return pow((c1 + c2 * lm) / (1.0 + c3 * lm), vec3(m2));
 }
 
 void main() {
@@ -107,6 +118,23 @@ void main() {
         lin = scene * pow(max(ys, 1e-6), 1.2 - 1.0) * peak;
     }
 
+    // `lin` is now linear BT.2020 light in nits. On an HDR swapchain we pass it
+    // through (no tone-map, no gamut reduction); on SDR we tone-map below.
+    int omode = u.mode.w;
+    if (omode == 1) {
+        // HDR10 PQ: encode absolute BT.2020 nits directly (PQ passthrough).
+        o_color = vec4(pq_oetf(lin / 10000.0), 1.0) * v_color;
+        return;
+    }
+    if (omode == 2) {
+        // scRGB extended-linear (BT.709), 1.0 == display SDR white.
+        vec3 l709 = BT2020_TO_709 * lin;
+        vec3 s = max(l709 / max(u.lum.z, 1.0), 0.0);
+        o_color = vec4(s, 1.0) * v_color;
+        return;
+    }
+
+    // --- SDR output: tone-map BT.2020 nits down into the SDR range ---
     // Normalise so SDR diffuse white maps to 1.0.
     float white = max(u.lum.y, 1.0);
     vec3 c = lin / white;
