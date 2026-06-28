@@ -200,14 +200,31 @@ jobs:
           if (Test-Path $bin) { echo "$bin" >> $env:GITHUB_PATH }
           & "$($tool.FullName)" --help
 
+      # The vcpkg `sdl3-shadercross` port can't be used here: it requires
+      # directx-dxc (DXIL), which has no arm64-macOS build. Metal only needs MSL,
+      # which doesn't use DXC — so get just SDL3 + SPIRV-Cross from vcpkg (both
+      # support arm64-osx) and build the shadercross CLI from source with DXC off.
+      # This still uses shadercross's own SDL_GPU-correct MSL binding remap.
       - name: Install SDL_shadercross (macOS)
         if: runner.os == 'macOS'
         run: |
           vcpkg="${VCPKG_INSTALLATION_ROOT:-/usr/local/share/vcpkg}"
-          "$vcpkg/vcpkg" install sdl3-shadercross --triplet arm64-osx
-          tool=$(find "$vcpkg/installed" -name shadercross -type f | head -1)
-          if [ -z "$tool" ]; then echo 'shadercross not found after vcpkg install'; exit 1; fi
-          chmod +x "$tool"
+          "$vcpkg/vcpkg" install sdl3 spirv-cross --triplet arm64-osx
+          git clone --depth 1 https://github.com/libsdl-org/SDL_shadercross.git "$RUNNER_TEMP/sc-src"
+          cmake -S "$RUNNER_TEMP/sc-src" -B "$RUNNER_TEMP/sc-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=arm64-osx \
+            -DSDLSHADERCROSS_DXC=OFF \
+            -DSDLSHADERCROSS_VENDORED=OFF \
+            -DSDLSHADERCROSS_SHARED=OFF \
+            -DSDLSHADERCROSS_STATIC=ON \
+            -DSDLSHADERCROSS_SPIRVCROSS_SHARED=OFF \
+            -DSDLSHADERCROSS_CLI=ON \
+            -DSDLSHADERCROSS_INSTALL=OFF
+          cmake --build "$RUNNER_TEMP/sc-build" --config Release
+          tool=$(find "$RUNNER_TEMP/sc-build" -name shadercross -type f -perm +111 | head -1)
+          if [ -z "$tool" ]; then echo 'shadercross CLI not found after build'; exit 1; fi
           echo "$(dirname "$tool")" >> "$GITHUB_PATH"
           "$tool" --help || true
 
