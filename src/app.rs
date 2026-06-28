@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::cache::{load_preload_cache, preload_cache_path};
+use crate::config::KeyBindings;
 use crate::decode::{downscale_color_image, is_video_file, scan_supported_images, to_egui_color_image};
 use crate::thumbnail::load_embedded_thumbnail;
 use crate::video_state::VideoState;
@@ -155,12 +156,15 @@ pub struct ImageViewerApp {
     full_res_worker: Option<FullResWorker>,
     preload_state: Option<Arc<PreloadState>>,
     memory_gate: Arc<MemoryGate>,
+    /// Configurable key bindings for video seeking and file browsing.
+    keybindings: KeyBindings,
 }
 
 impl ImageViewerApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, initial_fullscreen: bool) -> Self {
         let memory_gate = Arc::new(MemoryGate::new());
         let full_res_worker = Some(spawn_full_res_worker(cc.egui_ctx.clone(), memory_gate.clone()));
+        let keybindings = crate::config::Config::load().keybindings;
         let mut app = Self {
             image: None,
             video: None,
@@ -181,6 +185,7 @@ impl ImageViewerApp {
             full_res_worker,
             preload_state: None,
             memory_gate,
+            keybindings,
         };
         if let Some(path) = path {
             app.gather_images_from_directory(&path);
@@ -639,9 +644,15 @@ impl ImageViewerApp {
             }
         }
 
+        // Navigation keys are configurable (see `config::KeyBindings`). By
+        // default arrows seek within a video and PageUp/PageDown browse files,
+        // and file browsing works regardless of whether a video or image is
+        // shown.
+        let (seek_back, seek_fwd) = self.keybindings.video_seek.keys();
+        let (browse_prev, browse_next) = self.keybindings.file_browse.keys();
+
         if self.video.is_some() {
-            // Video playback controls. Arrows seek; file navigation moves to
-            // PageUp/PageDown so it stays reachable.
+            // Video playback controls.
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
                 if let Some(v) = &mut self.video { v.toggle_pause(); }
             }
@@ -651,25 +662,29 @@ impl ImageViewerApp {
             if ctx.input(|i| i.key_pressed(egui::Key::S)) {
                 if let Some(v) = &mut self.video { v.cycle_subtitle_track(); }
             }
-            // Ctrl+Arrow skips a minute; plain arrows skip 5 seconds.
+            // Ctrl+seek skips a minute; plain seek skips 5 seconds.
             let seek_step = if ctx.input(|i| i.modifiers.ctrl) { 60.0 } else { 5.0 };
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            if ctx.input(|i| i.key_pressed(seek_fwd)) {
                 if let Some(v) = &mut self.video { v.seek_relative(seek_step); }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+            if ctx.input(|i| i.key_pressed(seek_back)) {
                 if let Some(v) = &mut self.video { v.seek_relative(-seek_step); }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
+            // Browse only on keys that aren't already used for seeking, so a
+            // shared binding never triggers two actions at once.
+            if browse_next != seek_back && browse_next != seek_fwd
+                && ctx.input(|i| i.key_pressed(browse_next)) {
                 self.next_image(ctx);
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
+            if browse_prev != seek_back && browse_prev != seek_fwd
+                && ctx.input(|i| i.key_pressed(browse_prev)) {
                 self.prev_image(ctx);
             }
         } else {
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            if ctx.input(|i| i.key_pressed(browse_next)) {
                 self.next_image(ctx);
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+            if ctx.input(|i| i.key_pressed(browse_prev)) {
                 self.prev_image(ctx);
             }
         }

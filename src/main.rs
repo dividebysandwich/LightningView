@@ -6,6 +6,7 @@ use std::{env, error::Error, path::PathBuf};
 mod app;
 mod audio;
 mod cache;
+mod config;
 mod decode;
 mod formats;
 mod subtitles;

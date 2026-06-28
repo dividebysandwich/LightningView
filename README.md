@@ -13,7 +13,7 @@ This is a very slim image viewer that aims to replicate the most important funct
 * RAW file support for popular cameras
 * Basic FITS support with autostretching
 * Video playback with audio and subtitles
-* Browsing through the current directory with arrow keys
+* Browsing through the current directory with the keyboard (configurable)
 * Pan/Zoom with the mouse
 * Basic file operations such as deletion
 * Quick way to start the default image editor (planned)
@@ -58,8 +58,8 @@ lightningview.exe /unregister
 
 | Input | Action |
 | ----------- | ----------- |
-| Left Cursor | Show previous image in directory |
-| Right Cursor | Show next image in directory | 
+| Page Up | Show previous image in directory |
+| Page Down | Show next image in directory |
 | Home | Jump to first image in directory |
 | End | Jump to last image in directory |
 | R | Sort images randomly |
@@ -71,6 +71,28 @@ lightningview.exe /unregister
 | Mouse wheel | Zoom in / out |
 | Drag Mouse | Pan image|
 
+## Configuration
+
+On first run LightningView writes a config file with the default settings, which
+you can edit afterwards:
+
+* Linux / macOS: `~/.config/lightningview/config.toml`
+* Windows: `%APPDATA%\lightningview\config.toml`
+
+The navigation keys are configurable. Each action is bound to a key pair, either
+`"arrows"` (Left / Right) or `"pageupdown"` (Page Up / Page Down):
+
+```toml
+[keybindings]
+# Seek backward / forward within a playing video.
+video_seek = "arrows"
+# Move to the previous / next file in the directory.
+file_browse = "pageupdown"
+```
+
+File browsing works whether an image or a video is shown. To restore the old
+behaviour where the arrow keys browse files, swap the two values.
+
 ## Video playback
 
 Video files are detected by their extension and handed to an ffmpeg-backed player
@@ -79,9 +101,10 @@ audio track drives the A/V clock; videos without audio fall back to a wall clock
 and subtitle rendering. A seek/progress bar is shown transiently on screen when
 seeking or toggling playback.
 
-While a video is playing, the cursor keys seek within the file instead of
-navigating the directory; use Page Up / Page Down to move to the previous / next
-file.
+By default the cursor keys seek within a playing video while Page Up / Page Down
+move to the previous / next file. File browsing works the same way whether an
+image or a video is shown. These bindings are configurable — see
+[Configuration](#configuration).
 
 ### Video controls
 
