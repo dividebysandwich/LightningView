@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev
+          sudo apt-get install -y libssl-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev cmake libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxtst-dev libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols
 
       - name: Cargo cache
         uses: actions/cache@v4
@@ -134,7 +134,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev
+          sudo apt-get install -y libssl-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev cmake libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxtst-dev libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols
 
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
@@ -147,12 +147,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Prebuilt FFmpeg shared dev build from gyan.dev (LGPL).
+          # Prebuilt FFmpeg full (GPL) shared dev build from gyan.dev.
           # ffmpeg-sys-next looks for $FFMPEG_DIR/include and $FFMPEG_DIR/lib.
-          # Pinned so the soname-versioned DLL names (avcodec-62.dll, ...) are
-          # deterministic and match the names hard-coded in wix/main.wxs. Bumping
-          # this requires updating those names in the WiX source too.
-          $url = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.1-full_build-shared.7z'
+          # gyan rotates the versioned /packages/ files (they 404 once superseded),
+          # so use the stable "latest release" URL. It currently ships FFmpeg 8.x,
+          # whose soname-versioned DLLs (avcodec-62.dll, ...) match the names
+          # hard-coded in wix/main.wxs; if a future release bumps those majors,
+          # update wix/main.wxs (and the MSI job's DLL check) to match.
+          $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z'
           Invoke-WebRequest -Uri $url -OutFile ffmpeg.7z -UseBasicParsing
           7z x ffmpeg.7z -offmpeg-dist -y | Out-Null
           $root = (Get-ChildItem ffmpeg-dist -Directory | Select-Object -First 1).FullName
@@ -282,12 +284,20 @@ jobs:
       - name: Install FFmpeg (shared dev build)
         shell: pwsh
         run: |
-          # See the build job for rationale; the soname-versioned DLL names must
-          # match those referenced in wix/main.wxs.
-          $url = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.1-full_build-shared.7z'
+          # See the build job for rationale; gyan's stable "latest release" URL
+          # (the versioned /packages/ files 404 once superseded).
+          $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z'
           Invoke-WebRequest -Uri $url -OutFile ffmpeg.7z -UseBasicParsing
           7z x ffmpeg.7z -offmpeg-dist -y | Out-Null
           $root = (Get-ChildItem ffmpeg-dist -Directory | Select-Object -First 1).FullName
+          # Fail fast with a clear message if the release bumped soname majors,
+          # rather than letting it surface later as a confusing WiX "file not found".
+          $expected = @('avcodec-62.dll','avformat-62.dll','avutil-60.dll','swresample-6.dll','swscale-9.dll')
+          foreach ($d in $expected) {
+            if (-not (Test-Path "$root\bin\$d")) {
+              throw "FFmpeg DLL '$d' not found in $root\bin — the gyan release likely bumped soname versions. Update wix/main.wxs and this list to the DLLs actually present."
+            }
+          }
           echo "FFMPEG_DIR=$root" >> $env:GITHUB_ENV
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "FFMPEG_BIN=$root\bin" >> $env:GITHUB_ENV
@@ -330,7 +340,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev
+          sudo apt-get install -y libssl-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev cmake libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxtst-dev libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols
 
       - name: Cargo cache
         uses: actions/cache@v4
@@ -362,7 +372,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev fuse libfuse2 desktop-file-utils
+          sudo apt-get install -y libssl-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev libasound2-dev pkg-config clang libclang-dev cmake libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxtst-dev libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols fuse libfuse2 desktop-file-utils
 
       - name: Cargo cache
         uses: actions/cache@v4
