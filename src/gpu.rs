@@ -36,6 +36,7 @@ use crate::types::PixelBuf;
 // these will gain sibling blobs selected via `device.get_shader_formats()`.
 const QUAD_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.vert.spv"));
 const QUAD_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.frag.spv"));
+const VIDEO_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/video.frag.spv"));
 
 /// RGBA colour with components in `0.0..=1.0`.
 pub type Rgba = [f32; 4];
@@ -96,6 +97,14 @@ struct DrawCmd {
     count: u32,
 }
 
+/// The current frame's video quad, drawn before the overlay batch using the
+/// dedicated YUV pipeline (two plane samplers).
+struct VideoDraw {
+    y: Texture<'static>,
+    uv: Texture<'static>,
+    first: u32,
+}
+
 /// Horizontal text anchor for `draw_text`.
 #[derive(Clone, Copy, PartialEq)]
 pub enum TextAlign {
@@ -108,6 +117,8 @@ pub struct Renderer {
     window: Window,
     device: Device,
     pipeline: GraphicsPipeline,
+    /// Pipeline for NV12 video frames (samples Y + UV planes, YUV->RGB in shader).
+    video_pipeline: GraphicsPipeline,
     sampler: Sampler,
     /// 1x1 opaque white texture used to draw solid-colour rects.
     white: GpuTexture,
@@ -116,6 +127,8 @@ pub struct Renderer {
     // Per-frame geometry, rebuilt each frame.
     verts: Vec<Vertex>,
     cmds: Vec<DrawCmd>,
+    /// Optional video frame to draw beneath the overlay batch this frame.
+    video_draw: Option<VideoDraw>,
     drawable: (f32, f32),
 
     // Persistent dynamic vertex/transfer buffers, grown as needed.
@@ -165,7 +178,8 @@ impl Renderer {
             sdl3::gpu::SwapchainComposition::Sdr,
         );
 
-        let pipeline = build_pipeline(&device, &window)?;
+        let pipeline = build_pipeline(&device, &window, QUAD_FRAG_SPV, 1)?;
+        let video_pipeline = build_pipeline(&device, &window, VIDEO_FRAG_SPV, 2)?;
 
         let sampler = device
             .create_sampler(
@@ -185,11 +199,13 @@ impl Renderer {
             window,
             device,
             pipeline,
+            video_pipeline,
             sampler,
             white,
             clear_color: Color::RGB(20, 20, 20),
             verts: Vec::new(),
             cmds: Vec::new(),
+            video_draw: None,
             drawable: (width as f32, height as f32),
             vertex_buffer: None,
             transfer_buffer: None,
@@ -230,6 +246,7 @@ impl Renderer {
     pub fn begin_frame(&mut self) {
         self.verts.clear();
         self.cmds.clear();
+        self.video_draw = None;
         self.drawable = {
             let (w, h) = self.window.size_in_pixels();
             (w.max(1) as f32, h.max(1) as f32)
@@ -237,7 +254,9 @@ impl Renderer {
         self.frame_counter += 1;
     }
 
-    fn push_quad(&mut self, tex: Texture<'static>, dst: Rect, uv: Rect, color: Rgba) {
+    /// Append the 6 vertices for a quad to the shared buffer (no draw command).
+    /// Returns the index of the first appended vertex.
+    fn append_quad_verts(&mut self, dst: Rect, uv: Rect, color: Rgba) -> u32 {
         let (w, h) = self.drawable;
         let to_ndc = |x: f32, y: f32| [x / w * 2.0 - 1.0, 1.0 - y / h * 2.0];
 
@@ -257,7 +276,11 @@ impl Renderer {
 
         let first = self.verts.len() as u32;
         self.verts.extend_from_slice(&[tl, tr, bl, bl, tr, br]);
+        first
+    }
 
+    fn push_quad(&mut self, tex: Texture<'static>, dst: Rect, uv: Rect, color: Rgba) {
+        let first = self.append_quad_verts(dst, uv, color);
         // Coalesce consecutive draws of the same texture into one command.
         if let Some(last) = self.cmds.last_mut() {
             if last.tex.raw() == tex.raw() {
@@ -266,6 +289,27 @@ impl Renderer {
             }
         }
         self.cmds.push(DrawCmd { tex, first, count: 6 });
+    }
+
+    /// Draw an NV12 video frame (Y + UV plane textures) into `dst`, beneath this
+    /// frame's overlay batch. The YUV->RGB conversion happens in the video shader.
+    pub fn draw_video(&mut self, y: &GpuTexture, uv: &GpuTexture, dst: Rect) {
+        let first = self.append_quad_verts(dst, full_uv(), WHITE);
+        self.video_draw = Some(VideoDraw {
+            y: y.tex.clone(),
+            uv: uv.tex.clone(),
+            first,
+        });
+    }
+
+    /// Upload a single-channel (R8) plane — e.g. an NV12 luma plane.
+    pub fn upload_r8(&self, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTexture> {
+        upload_plane(&self.device, w, h, bytes, sdl3::gpu::TextureFormat::R8Unorm, 1)
+    }
+
+    /// Upload a two-channel (R8G8) plane — e.g. an NV12 interleaved chroma plane.
+    pub fn upload_r8g8(&self, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTexture> {
+        upload_plane(&self.device, w, h, bytes, sdl3::gpu::TextureFormat::R8g8Unorm, 2)
     }
 
     /// Draw a texture into `dst` (pixel space). `uv` selects the source region
@@ -355,6 +399,7 @@ impl Renderer {
     pub fn end_frame(&mut self) -> Result<()> {
         let verts = std::mem::take(&mut self.verts);
         let cmds = std::mem::take(&mut self.cmds);
+        let video_draw = self.video_draw.take();
         // Evict text-cache entries unused for a while to bound memory.
         let fc = self.frame_counter;
         self.text_cache.retain(|_, c| fc.saturating_sub(c.last_used) < 240);
@@ -404,7 +449,6 @@ impl Renderer {
                     .begin_render_pass(&cmd, &color_targets, None)
                     .map_err(|e| anyhow!("begin render pass: {e}"))?;
 
-                pass.bind_graphics_pipeline(&self.pipeline);
                 if nbytes > 0 {
                     pass.bind_vertex_buffers(
                         0,
@@ -412,6 +456,26 @@ impl Renderer {
                             .with_buffer(self.vertex_buffer.as_ref().unwrap())
                             .with_offset(0)],
                     );
+
+                    // Video frame first (beneath the overlays), via the YUV pipeline.
+                    if let Some(vd) = &video_draw {
+                        pass.bind_graphics_pipeline(&self.video_pipeline);
+                        pass.bind_fragment_samplers(
+                            0,
+                            &[
+                                TextureSamplerBinding::new()
+                                    .with_texture(&vd.y)
+                                    .with_sampler(&self.sampler),
+                                TextureSamplerBinding::new()
+                                    .with_texture(&vd.uv)
+                                    .with_sampler(&self.sampler),
+                            ],
+                        );
+                        pass.draw_primitives(6, 1, vd.first as usize, 0);
+                    }
+
+                    // Then the overlay batch (images, text, rects) via the quad pipeline.
+                    pass.bind_graphics_pipeline(&self.pipeline);
                     for c in &cmds {
                         pass.bind_fragment_samplers(
                             0,
@@ -462,15 +526,28 @@ fn full_uv() -> Rect {
     Rect::from_min_max(Vec2::ZERO, Vec2::new(1.0, 1.0))
 }
 
-/// Create a GPU texture and upload tightly-packed RGBA8 bytes into it. Runs its
-/// own one-shot copy-pass command buffer, so callers only need `&Device`.
+/// Create a GPU texture and upload tightly-packed RGBA8 bytes into it.
 fn upload_rgba(device: &Device, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTexture> {
+    upload_plane(device, w, h, bytes, sdl3::gpu::TextureFormat::R8g8b8a8Unorm, 4)
+}
+
+/// Create a GPU texture of `format` (with `bpp` bytes per texel) and upload
+/// tightly-packed bytes into it. Runs its own one-shot copy-pass command buffer,
+/// so callers only need `&Device`. Used for RGBA images and NV12 video planes.
+fn upload_plane(
+    device: &Device,
+    w: u32,
+    h: u32,
+    bytes: &[u8],
+    format: sdl3::gpu::TextureFormat,
+    bpp: u32,
+) -> Result<GpuTexture> {
     let w = w.max(1);
     let h = h.max(1);
     let tex = device
         .create_texture(
             TextureCreateInfo::new()
-                .with_format(sdl3::gpu::TextureFormat::R8g8b8a8Unorm)
+                .with_format(format)
                 .with_type(TextureType::_2D)
                 .with_width(w)
                 .with_height(h)
@@ -480,7 +557,7 @@ fn upload_rgba(device: &Device, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTextu
         )
         .map_err(|e| anyhow!("create texture {w}x{h}: {e}"))?;
 
-    let size_bytes = w * h * 4;
+    let size_bytes = w * h * bpp;
     let tb = device
         .create_transfer_buffer()
         .with_size(size_bytes)
@@ -517,7 +594,12 @@ fn upload_rgba(device: &Device, w: u32, h: u32, bytes: &[u8]) -> Result<GpuTextu
     Ok(GpuTexture { tex, size: [w, h] })
 }
 
-fn build_pipeline(device: &Device, window: &Window) -> Result<GraphicsPipeline> {
+fn build_pipeline(
+    device: &Device,
+    window: &Window,
+    frag_code: &[u8],
+    num_samplers: u32,
+) -> Result<GraphicsPipeline> {
     let vert = device
         .create_shader()
         .with_code(ShaderFormat::SPIRV, QUAD_VERT_SPV, ShaderStage::Vertex)
@@ -526,8 +608,8 @@ fn build_pipeline(device: &Device, window: &Window) -> Result<GraphicsPipeline> 
         .map_err(|e| anyhow!("build vertex shader: {e}"))?;
     let frag = device
         .create_shader()
-        .with_code(ShaderFormat::SPIRV, QUAD_FRAG_SPV, ShaderStage::Fragment)
-        .with_samplers(1)
+        .with_code(ShaderFormat::SPIRV, frag_code, ShaderStage::Fragment)
+        .with_samplers(num_samplers)
         .with_entrypoint(c"main")
         .build()
         .map_err(|e| anyhow!("build fragment shader: {e}"))?;

@@ -889,11 +889,11 @@ impl ImageViewerApp {
         let area = Rect::from_min_size(Vec2::ZERO, renderer.drawable_size());
 
         if let Some(video) = &self.video {
-            if let Some(tex) = video.texture() {
+            if let Some((y, uv)) = video.planes() {
                 let frame_size =
                     Vec2::new(video.frame_size[0] as f32, video.frame_size[1] as f32);
                 let rect = fit_centered(frame_size, area);
-                renderer.draw_texture_full(tex, rect, WHITE);
+                renderer.draw_video(y, uv, rect);
             } else {
                 let pos = area.center();
                 renderer.draw_text(

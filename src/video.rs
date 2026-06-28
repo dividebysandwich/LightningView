@@ -1,10 +1,10 @@
 //! Threaded ffmpeg video decoder. Frames are decoded ahead of time on a worker
 //! thread and queued in PTS order; the UI samples them by the audio clock.
-//! Ported near-verbatim from sparkplayer (sparkplayer-native `video.rs`); the
-//! `frame_to_pixel_buf` helper adapts the RGB24 output for GPU upload.
+//! Ported near-verbatim from sparkplayer (sparkplayer-native `video.rs`).
 //!
-//! Note: this still converts to 8-bit RGB on the CPU (SDR). The HDR phases
-//! replace this with native YUV/P010 plane upload + a shader colour pipeline.
+//! Frames are emitted as native NV12 planes (8-bit 4:2:0); the GPU video shader
+//! does the YUV->RGB conversion. The HDR phases extend this to 10-bit P010 input
+//! plus PQ/HLG transfer handling.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -20,28 +20,20 @@ use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
 use ffmpeg::util::frame::video::Video;
 
-use crate::types::PixelBuf;
-
-/// A decoded video frame in RGB8.
+/// A decoded video frame in NV12 (8-bit 4:2:0): a luma plane plus an interleaved
+/// chroma plane, both tightly packed (ffmpeg row stride stripped). The GPU video
+/// shader does the YUV->RGB conversion, so no CPU colour conversion happens here.
 pub struct VideoFrame {
     pub pts_secs: f64,
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
-}
-
-/// Expand an RGB24 [`VideoFrame`] into a tightly-packed RGBA8 [`PixelBuf`].
-pub fn frame_to_pixel_buf(frame: &VideoFrame) -> PixelBuf {
-    let w = frame.width as usize;
-    let h = frame.height as usize;
-    let mut rgba = vec![0u8; w * h * 4];
-    for (src, dst) in frame.data.chunks_exact(3).zip(rgba.chunks_exact_mut(4)) {
-        dst[0] = src[0];
-        dst[1] = src[1];
-        dst[2] = src[2];
-        dst[3] = 255;
-    }
-    PixelBuf::new(frame.width, frame.height, rgba)
+    pub chroma_width: u32,
+    pub chroma_height: u32,
+    /// Luma plane: `width * height` bytes (one R8 texel per sample).
+    pub y_plane: Vec<u8>,
+    /// Interleaved chroma plane: `chroma_width * chroma_height * 2` bytes
+    /// (one R8G8 texel per (U,V) pair).
+    pub uv_plane: Vec<u8>,
 }
 
 struct SharedQueue {
@@ -216,11 +208,14 @@ fn decode_loop(
         ictx.stream(stream_index).context("stream gone")?.parameters(),
     )?;
     let mut decoder = codec_ctx.decoder().video()?;
+    // Normalise every source format to NV12 (8-bit 4:2:0). This collapses the
+    // wide variety of decoder output formats to a single layout the GPU shader
+    // understands, while keeping the conversion on libswscale's optimised path.
     let mut scaler = Scaler::get(
         src_format,
         width,
         height,
-        Pixel::RGB24,
+        Pixel::NV12,
         width,
         height,
         Flags::BILINEAR,
@@ -230,21 +225,40 @@ fn decode_loop(
     let tb_den = time_base.denominator() as f64;
     let pts_to_secs = |pts: i64| -> f64 { pts as f64 * tb_num / tb_den };
 
-    let extract_frame = |rgb: &Video, secs: f64| -> VideoFrame {
-        let stride = rgb.stride(0);
-        let plane = rgb.data(0);
-        let w = rgb.width() as usize;
-        let h = rgb.height() as usize;
-        let mut buf = Vec::with_capacity(w * h * 3);
-        for y in 0..h {
-            let row_start = y * stride;
-            buf.extend_from_slice(&plane[row_start..row_start + w * 3]);
+    // Pull the two NV12 planes out of the scaled frame, stripping ffmpeg's row
+    // padding so each plane is tightly packed for direct GPU upload.
+    let extract_frame = |nv12: &Video, secs: f64| -> VideoFrame {
+        let w = nv12.width() as usize;
+        let h = nv12.height() as usize;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+
+        let y_stride = nv12.stride(0);
+        let y_data = nv12.data(0);
+        let mut y_plane = Vec::with_capacity(w * h);
+        for row in 0..h {
+            let s = row * y_stride;
+            y_plane.extend_from_slice(&y_data[s..s + w]);
         }
+
+        // Interleaved UV: `cw` (U,V) pairs per row => `cw * 2` bytes, `ch` rows.
+        let uv_stride = nv12.stride(1);
+        let uv_data = nv12.data(1);
+        let row_bytes = cw * 2;
+        let mut uv_plane = Vec::with_capacity(row_bytes * ch);
+        for row in 0..ch {
+            let s = row * uv_stride;
+            uv_plane.extend_from_slice(&uv_data[s..s + row_bytes]);
+        }
+
         VideoFrame {
             pts_secs: secs,
             width: w as u32,
             height: h as u32,
-            data: buf,
+            chroma_width: cw as u32,
+            chroma_height: ch as u32,
+            y_plane,
+            uv_plane,
         }
     };
 
@@ -278,11 +292,11 @@ fn decode_loop(
                     let pts = decoded.pts().unwrap_or(0);
                     let secs = pts_to_secs(pts);
 
-                    let mut rgb = Video::empty();
-                    if scaler.run(&decoded, &mut rgb).is_err() {
+                    let mut conv = Video::empty();
+                    if scaler.run(&decoded, &mut conv).is_err() {
                         continue;
                     }
-                    let mut pending = Some(extract_frame(&rgb, secs));
+                    let mut pending = Some(extract_frame(&conv, secs));
 
                     // Backpressure: wait until the queue has room.
                     while pending.is_some() {
@@ -318,12 +332,12 @@ fn decode_loop(
                 while decoder.receive_frame(&mut decoded).is_ok() {
                     let pts = decoded.pts().unwrap_or(0);
                     let secs = pts_to_secs(pts);
-                    let mut rgb = Video::empty();
-                    if scaler.run(&decoded, &mut rgb).is_err() {
+                    let mut conv = Video::empty();
+                    if scaler.run(&decoded, &mut conv).is_err() {
                         continue;
                     }
                     if let Ok(mut q) = inner.lock() {
-                        q.frames.push_back(extract_frame(&rgb, secs));
+                        q.frames.push_back(extract_frame(&conv, secs));
                     }
                 }
                 if let Ok(mut q) = inner.lock() {
@@ -371,6 +385,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let f = got.expect("a frame should be produced");
-        assert_eq!(f.data.len(), f.width as usize * f.height as usize * 3);
+        assert_eq!(f.y_plane.len(), f.width as usize * f.height as usize);
+        assert_eq!(
+            f.uv_plane.len(),
+            f.chroma_width as usize * f.chroma_height as usize * 2
+        );
     }
 }

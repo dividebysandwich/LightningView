@@ -32,6 +32,7 @@ fn compile_shaders() {
     let shaders = [
         ("shaders/quad.vert", "vertex"),
         ("shaders/quad.frag", "fragment"),
+        ("shaders/video.frag", "fragment"),
     ];
 
     for (src, stage) in shaders {
