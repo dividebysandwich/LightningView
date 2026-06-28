@@ -910,7 +910,11 @@ impl ImageViewerApp {
             if let Some(osd) = video.osd_text() {
                 draw_osd(renderer, area, &osd);
             }
-            draw_seek_bar(renderer, area, video.position_secs(), video.duration_secs());
+            // The seek bar / time HUD auto-hides a few seconds after the last
+            // interaction and reappears on seek / pause / resume.
+            if video.controls_visible() {
+                draw_seek_bar(renderer, area, video.position_secs(), video.duration_secs());
+            }
         } else if self.image.is_some() {
             self.render_image(renderer, area);
         } else if let Some(err) = self.last_error.clone() {
@@ -1061,7 +1065,9 @@ impl ImageViewerApp {
             return true;
         }
         if let Some(v) = &self.video {
-            if v.is_playing() {
+            // Keep rendering while playing, and while the HUD is fading so it
+            // hides/reappears promptly even when paused.
+            if v.is_playing() || v.controls_visible() {
                 return true;
             }
         }

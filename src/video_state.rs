@@ -16,6 +16,10 @@ use crate::video::{frame_to_pixel_buf, VideoStream};
 
 const OSD_DURATION: Duration = Duration::from_millis(2000);
 
+/// How long the on-screen controls (seek bar + time readout) stay visible after
+/// the last interaction (seek, pause/resume, track change) before fading out.
+const CONTROLS_DURATION: Duration = Duration::from_millis(3500);
+
 /// Time constant for the master-clock low-pass filter. Long enough to smooth a
 /// coarse audio-callback staircase down to a few ms of ripple, short enough to
 /// settle within a couple of seconds after the initial sync / a seek.
@@ -52,6 +56,9 @@ pub struct VideoState {
     wall_started: Option<Instant>,
 
     osd: Option<(String, Instant)>,
+    /// When the seek bar / time HUD was last (re)shown. Refreshed on every
+    /// interaction; the HUD is drawn only while within `CONTROLS_DURATION` of it.
+    controls_shown_at: Instant,
 }
 
 impl VideoState {
@@ -100,6 +107,8 @@ impl VideoState {
             wall_base_secs: 0.0,
             wall_started: Some(Instant::now()),
             osd: None,
+            // Show the controls briefly when a video first opens, then fade out.
+            controls_shown_at: Instant::now(),
         })
     }
 
@@ -215,8 +224,17 @@ impl VideoState {
             .map(|(s, _)| s.as_str())
     }
 
+    /// Whether the seek bar / time HUD should currently be drawn. True for a few
+    /// seconds after the last interaction (seek, pause/resume, track change).
+    pub fn controls_visible(&self) -> bool {
+        self.controls_shown_at.elapsed() < CONTROLS_DURATION
+    }
+
     fn set_osd(&mut self, text: String) {
         self.osd = Some((text, Instant::now()));
+        // Any action that surfaces an OSD message is an interaction, so re-show
+        // the seek bar / time HUD alongside it.
+        self.controls_shown_at = Instant::now();
     }
 
     pub fn toggle_pause(&mut self) {
