@@ -6,6 +6,7 @@ use std::process::Command;
 
 fn main() {
     compile_shaders();
+    link_macos_clang_rt();
 
     #[cfg(target_os = "windows")]
     {
@@ -16,6 +17,37 @@ fn main() {
         res.set("ProductName", "LightningView");
         res.set("FileDescription", "LightningView");
         res.compile().unwrap();
+    }
+}
+
+/// On macOS, link clang's compiler runtime so SDL3's Objective-C `@available`
+/// checks resolve. clang lowers `@available` to a call to `__isPlatformVersionAtLeast`,
+/// which lives in `libclang_rt.osx.a` (compiler-rt). rustc drives the final link
+/// with `-nodefaultlibs`, which omits that runtime, so without this the SDL3
+/// objects come up with `Undefined symbols: ___isPlatformVersionAtLeast`.
+fn link_macos_clang_rt() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+    let resource_dir = Command::new(&cc)
+        .arg("-print-resource-dir")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|d| !d.is_empty());
+
+    match resource_dir {
+        Some(dir) => {
+            // The macOS builtins archive lives at <resource-dir>/lib/darwin/libclang_rt.osx.a.
+            println!("cargo:rustc-link-search=native={dir}/lib/darwin");
+            println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        }
+        None => println!(
+            "cargo:warning=could not determine clang resource dir; SDL3 @available \
+             symbols (__isPlatformVersionAtLeast) may fail to link"
+        ),
     }
 }
 
