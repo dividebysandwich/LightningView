@@ -20,6 +20,11 @@ const OSD_DURATION: Duration = Duration::from_millis(2000);
 /// the last interaction (seek, pause/resume, track change) before fading out.
 const CONTROLS_DURATION: Duration = Duration::from_millis(3500);
 
+/// Safety cap on the post-seek audio hold: if the decoder hasn't produced a
+/// frame at the seek target within this long (decode error, weird file), give up
+/// and resume anyway rather than freezing playback.
+const RESYNC_TIMEOUT: Duration = Duration::from_millis(3000);
+
 /// Time constant for the master-clock low-pass filter. Long enough to smooth a
 /// coarse audio-callback staircase down to a few ms of ripple, short enough to
 /// settle within a couple of seconds after the initial sync / a seek.
@@ -59,6 +64,14 @@ pub struct VideoState {
     // Wall-clock fallback (used only when `use_audio_clock` is false).
     wall_base_secs: f64,
     wall_started: Option<Instant>,
+
+    // Post-seek resync: hold the master clock (and audio) at the seek target
+    // until the decoder produces the target frame, so A/V start together instead
+    // of the video fast-forwarding to catch an audio clock that ran ahead during
+    // the seek's decode latency.
+    resyncing: bool,
+    resync_target: f64,
+    resync_started: Instant,
 
     osd: Option<(String, Instant)>,
     /// When the seek bar / time HUD was last (re)shown. Refreshed on every
@@ -113,6 +126,9 @@ impl VideoState {
             last_clock_tick: None,
             wall_base_secs: 0.0,
             wall_started: Some(Instant::now()),
+            resyncing: false,
+            resync_target: 0.0,
+            resync_started: Instant::now(),
             osd: None,
             // Show the controls briefly when a video first opens, then fade out.
             controls_shown_at: Instant::now(),
@@ -137,6 +153,13 @@ impl VideoState {
     /// path is already smooth, so it passes through; the audio path is
     /// low-pass filtered to remove the per-callback staircase.
     fn advance_clock(&mut self) -> f64 {
+        // While resyncing after a seek the clock is frozen at the target so the
+        // picture doesn't advance until the decoder has caught up to it.
+        if self.resyncing {
+            self.smooth_clock_secs = self.resync_target;
+            return self.resync_target;
+        }
+
         let raw = self.raw_clock_secs();
 
         // The wall clock is monotonic and smooth already; nothing to filter.
@@ -182,6 +205,12 @@ impl VideoState {
     /// Pull the frame for the current clock and upload it; refresh the active
     /// subtitle line. Called once per UI frame.
     pub fn tick(&mut self, renderer: &Renderer) {
+        // Release the post-seek hold once the target frame is decoded (or the
+        // safety timeout elapses), so audio and video resume together.
+        if self.resyncing && (self.stream.has_queued_frame() || self.resync_started.elapsed() > RESYNC_TIMEOUT) {
+            self.finish_resync();
+        }
+
         let clock = self.advance_clock();
         if let Some(frame) = self.stream.frame_at(clock) {
             self.frame_size = [frame.width as usize, frame.height as usize];
@@ -290,13 +319,47 @@ impl VideoState {
         self.set_osd(msg.to_string());
     }
 
+    /// Enter the post-seek hold: freeze the master clock at `target` and pause
+    /// audio so neither runs ahead of the picture while the decoder catches up.
+    fn begin_resync(&mut self, target: f64) {
+        self.resyncing = true;
+        self.resync_target = target;
+        self.resync_started = Instant::now();
+        self.smooth_clock_secs = target;
+        self.clock_initialized = true;
+        if self.use_audio_clock && !self.paused {
+            if let Some(a) = &self.audio {
+                a.set_sink_paused(true);
+            }
+        }
+    }
+
+    /// Release the post-seek hold: resume audio (or re-anchor the wall clock) and
+    /// hard-resync the smoothed clock to the now-current raw clock.
+    fn finish_resync(&mut self) {
+        self.resyncing = false;
+        if self.use_audio_clock {
+            if !self.paused {
+                if let Some(a) = &self.audio {
+                    a.set_sink_paused(false);
+                }
+            }
+        } else {
+            self.wall_base_secs = self.resync_target;
+            self.wall_started = if self.paused { None } else { Some(Instant::now()) };
+        }
+        self.clock_initialized = false;
+        self.smooth_clock_secs = self.resync_target;
+        self.last_clock_tick = None;
+    }
+
     pub fn seek_relative(&mut self, delta_secs: f64) {
         let max = self
             .duration
             .map(|d| (d.as_secs_f64() - 0.2).max(0.0))
             .unwrap_or(f64::MAX);
 
-        if self.use_audio_clock {
+        let target = if self.use_audio_clock {
             let pos = self
                 .audio
                 .as_ref()
@@ -307,14 +370,16 @@ impl VideoState {
             if let Some(a) = self.audio.as_mut() {
                 let _ = a.seek_relative(delta_secs, self.duration);
             }
+            target
         } else {
             let target = (self.raw_clock_secs() + delta_secs).clamp(0.0, max);
             self.stream.seek(Duration::from_secs_f64(target));
-            self.wall_base_secs = target;
-            if self.wall_started.is_some() {
-                self.wall_started = Some(Instant::now());
-            }
-        }
+            target
+        };
+
+        // Hold the clock + audio at the target until the decoder produces the
+        // target frame, then both resume together (see begin/finish_resync).
+        self.begin_resync(target);
 
         let sign = if delta_secs < 0.0 { "\u{2212}" } else { "+" };
         let mag = delta_secs.abs() as i64;

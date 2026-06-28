@@ -579,6 +579,17 @@ impl AudioPlayer {
         }
     }
 
+    /// Pause/resume the sink directly (independent of the user's play/pause
+    /// state). Used to hold audio still while the video catches up after a seek,
+    /// so the master clock can't run ahead of the decoded picture.
+    pub fn set_sink_paused(&self, paused: bool) {
+        if paused {
+            self.player.pause();
+        } else {
+            self.player.play();
+        }
+    }
+
     pub fn seek_relative(&mut self, delta_secs: f64, total: Option<Duration>) -> Result<()> {
         let Some(path) = self.current_path.clone() else {
             return Ok(());

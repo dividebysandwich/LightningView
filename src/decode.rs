@@ -478,7 +478,7 @@ mod tests {
             image::load_from_memory(&bytes).unwrap();
         });
         bench("zune full -> RGBA", &|| {
-            image::load_from_memory(&bytes).unwrap().into_rgba8();
+            let _ = image::load_from_memory(&bytes).unwrap().into_rgba8();
         });
         bench("turbo full -> RGBA", &|| {
             decode_jpeg_turbo(&bytes, None).unwrap();
