@@ -43,6 +43,15 @@ To open an image in windowed mode instead of fullscreen:
 lightningview /windowed <imagefile.ext>
 ```
 
+To print verbose debug logs to stdout (useful for diagnosing startup failures and
+HDR support — it reports the selected GPU backend and the display's HDR capability):
+```
+lightningview /debug <imagefile.ext>
+```
+On Windows this attaches to the launching terminal's console so the output is
+visible despite the GUI build having no console of its own. The flags can be
+combined and given in any order (e.g. `lightningview /windowed /debug <file>`).
+
 To register as default program for viewing images on older versions of Windows:
 ```
 lightningview.exe /register

@@ -8,6 +8,20 @@ use std::{
 use winreg::{enums::*, RegKey};
 
 use crate::formats::{IMAGE_RS_SUPPORTED_FORMATS, FITS_SUPPORTED_FORMATS, IMAGEREADER_SUPPORTED_FORMATS, RAW_SUPPORTED_FORMATS, VIDEO_SUPPORTED_FORMATS};
+
+/// Attach to the launching terminal's console so `stdout`/`stderr` are visible.
+///
+/// The release build is `windows_subsystem = "windows"` (no console), so `/debug`
+/// output would otherwise go nowhere. `AttachConsole(ATTACH_PARENT_PROCESS)` wires
+/// our standard handles to the parent shell's console; it fails harmlessly when
+/// there's no parent console (e.g. launched from Explorer), in which case the
+/// message box + error log remain the diagnostic channels.
+pub fn attach_parent_console() {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
 const CANONICAL_NAME: &str = "lightningview.exe";
 // Must match the ProgId the WiX installer registers (wix/main.wxs). Using the same
 // ProgId for the manual `/register` path and the installer prevents two different

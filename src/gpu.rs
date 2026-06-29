@@ -71,6 +71,26 @@ fn available_shader_formats() -> ShaderFormat {
     f
 }
 
+/// Human-readable list of the shader formats in `f`, naming the backend each
+/// implies (the raw `ShaderFormat(n)` bitmask is opaque in `/debug` logs).
+fn describe_shader_formats(f: ShaderFormat) -> String {
+    let has = |bit: ShaderFormat| f & bit == bit;
+    let names: Vec<&str> = [
+        (ShaderFormat::SPIRV, "SPIRV(Vulkan)"),
+        (ShaderFormat::DXIL, "DXIL(D3D12)"),
+        (ShaderFormat::MSL, "MSL(Metal)"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| has(*bit))
+    .map(|(_, name)| name)
+    .collect();
+    if names.is_empty() {
+        format!("{f:?}")
+    } else {
+        names.join(" | ")
+    }
+}
+
 /// Pick the bytecode + format + entry point for `blobs` matching what the device
 /// consumes (`device.get_shader_formats()`). Prefers the platform-native format
 /// (DXIL on D3D12, MSL on Metal) and falls back to SPIR-V (Vulkan).
@@ -312,6 +332,20 @@ impl Renderer {
         let white = upload_rgba(&device, 1, 1, &[255, 255, 255, 255])?;
 
         log_displays();
+        // Startup HDR/back-end snapshot for `/debug`: which shader bytecode the
+        // device actually selected (DXIL=D3D12, MSL=Metal, SPIRV=Vulkan) and
+        // whether the current window's display can present HDR — so HDR support
+        // can be diagnosed without having to play an HDR clip first.
+        log::debug!(
+            "GPU device selected shader formats: {}",
+            describe_shader_formats(device.get_shader_formats())
+        );
+        log::debug!(
+            "Window HDR at startup: enabled={} hdr10_supported={} scrgb_supported={}",
+            window_hdr_enabled(&window),
+            supports_composition(&device, &window, SwapchainComposition::Hdr10St2084),
+            supports_composition(&device, &window, SwapchainComposition::HdrExtendedLinear),
+        );
         let force_hdr = forced_hdr_composition();
         if let Some(c) = force_hdr {
             log::info!("LV_FORCE_HDR set: forcing {c:?} for HDR content.");
