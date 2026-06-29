@@ -138,6 +138,7 @@ fn draw_seek_bar(
     pos_secs: f64,
     dur_secs: Option<f64>,
     scrub_frac: Option<f32>,
+    looping: bool,
 ) {
     let Some(g) = seek_bar_geom(area) else {
         return;
@@ -153,13 +154,14 @@ fn draw_seek_bar(
         Some(d) => format!("{} / {}", format_time(display_secs), format_time(d)),
         None => format_time(display_secs),
     };
-    r.draw_text(
-        &label,
-        14.0,
-        Vec2::new(g.right, g.track_y - g.track_h - 18.0),
-        TextAlign::Right,
-        WHITE,
-    );
+    let label_y = g.track_y - g.track_h - 18.0;
+    r.draw_text(&label, 14.0, Vec2::new(g.right, label_y), TextAlign::Right, WHITE);
+    // Loop indicator, left-aligned opposite the time readout, while loop mode is
+    // on. Plain ASCII so it can't render as tofu on systems whose font lacks a
+    // loop glyph (the font is system-provided, not bundled).
+    if looping {
+        r.draw_text("Loop", 14.0, Vec2::new(g.left, label_y), TextAlign::Left, WHITE);
+    }
 
     let frac = match scrub_frac {
         Some(f) => f,
@@ -907,8 +909,17 @@ impl ImageViewerApp {
         if self.video.is_some() {
             match kc {
                 Keycode::Space => {
+                    let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
                     if let Some(v) = &mut self.video {
-                        v.toggle_pause();
+                        if shift {
+                            // Shift+Space toggles loop mode.
+                            v.toggle_loop();
+                        } else if v.is_finished() {
+                            // Space after the video has played out restarts it.
+                            v.restart();
+                        } else {
+                            v.toggle_pause();
+                        }
                     }
                 }
                 Keycode::A => {
@@ -1154,7 +1165,7 @@ impl ImageViewerApp {
             // it stays up and previews the marker at the drag position.
             if video.controls_visible() || self.scrubbing {
                 let scrub = self.scrubbing.then_some(self.scrub_frac);
-                draw_seek_bar(renderer, area, video.position_secs(), video.duration_secs(), scrub);
+                draw_seek_bar(renderer, area, video.position_secs(), video.duration_secs(), scrub, video.is_looping());
             }
         } else if self.image.is_some() {
             self.render_image(renderer, area);

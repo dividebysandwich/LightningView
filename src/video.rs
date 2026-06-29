@@ -199,6 +199,13 @@ impl VideoStream {
         self.inner.lock().map(|q| !q.frames.is_empty()).unwrap_or(false)
     }
 
+    /// Whether the whole file has been decoded *and* every queued frame has been
+    /// consumed — i.e. the last frame is on screen and there is nothing left to
+    /// play. A seek clears `eof`, so this resets after restarting or seeking.
+    pub fn is_drained(&self) -> bool {
+        self.inner.lock().map(|q| q.eof && q.frames.is_empty()).unwrap_or(false)
+    }
+
     /// PTS (seconds) of every frame currently queued. Test-only: used to assert
     /// that no pre-seek-target frames are buffered.
     #[cfg(test)]

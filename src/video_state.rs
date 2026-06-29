@@ -50,6 +50,9 @@ pub struct VideoState {
     active_subtitle_track: Option<usize>,
     current_subtitle: Option<String>,
     paused: bool,
+    /// When true, playback restarts from the beginning once it reaches the end
+    /// (toggled with Shift+Space). The HUD shows a loop indicator while set.
+    looping: bool,
 
     // Smoothed master clock. The raw audio clock advances in bursts — one step
     // per output-buffer callback — so reading it directly to pick the video
@@ -121,6 +124,7 @@ impl VideoState {
             active_subtitle_track: None,
             current_subtitle: None,
             paused: false,
+            looping: false,
             smooth_clock_secs: 0.0,
             clock_initialized: false,
             last_clock_tick: None,
@@ -205,6 +209,11 @@ impl VideoState {
     /// Pull the frame for the current clock and upload it; refresh the active
     /// subtitle line. Called once per UI frame.
     pub fn tick(&mut self, renderer: &Renderer) {
+        // In loop mode, jump back to the start as soon as the file plays out.
+        if self.looping && !self.paused && !self.resyncing && self.stream.is_drained() {
+            self.seek_to_absolute(0.0);
+        }
+
         // Release the post-seek hold once the target frame is decoded (or the
         // safety timeout elapses), so audio and video resume together.
         if self.resyncing && (self.stream.has_queued_frame() || self.resync_started.elapsed() > RESYNC_TIMEOUT) {
@@ -280,6 +289,36 @@ impl VideoState {
 
     pub fn is_playing(&self) -> bool {
         !self.paused
+    }
+
+    /// Whether playback has reached the end (the whole file is decoded and the
+    /// last frame is on screen). Pressing Space in this state restarts instead
+    /// of pausing.
+    pub fn is_finished(&self) -> bool {
+        self.stream.is_drained()
+    }
+
+    /// Whether loop mode is on (drives the HUD's loop indicator).
+    pub fn is_looping(&self) -> bool {
+        self.looping
+    }
+
+    /// Toggle loop mode (Shift+Space). When enabled, `tick` restarts the file
+    /// each time it plays out; an already-finished file restarts on the next tick.
+    pub fn toggle_loop(&mut self) {
+        self.looping = !self.looping;
+        self.set_osd(if self.looping { "Loop on" } else { "Loop off" }.to_string());
+    }
+
+    /// Restart playback from the beginning, resuming if it was paused. Used when
+    /// Space is pressed after the video has finished.
+    pub fn restart(&mut self) {
+        if self.paused {
+            // Unpause first so the seek's resync resumes audio/video together.
+            self.toggle_pause();
+        }
+        self.seek_to_absolute(0.0);
+        self.set_osd("Restart".to_string());
     }
 
     pub fn osd_text(&self) -> Option<&str> {
