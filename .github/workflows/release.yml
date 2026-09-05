@@ -597,6 +597,13 @@ jobs:
           bundle: lightningview.flatpak
           manifest-path: io.github.dividebysandwich.lightningview.yml
           cache-key: flatpak-builder-${{ github.sha }}
+          # The action uploads the bundle itself by default, as an artifact
+          # named after the bundle + arch. That is a second copy of the very
+          # same lightningview.flatpak the Archive step below publishes as
+          # result-flatpak, and the deploy job would then try to attach two
+          # assets with the same file name to the release (the second upload
+          # fails). Let the explicit Archive step own the artifact.
+          upload-artifact: false
 
       - name: Archive Flatpak Bundle
         uses: actions/upload-artifact@v4
@@ -615,6 +622,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
+          # Only the artifacts the build jobs publish for release. Guards
+          # against any action that uploads a bundle of its own accord and
+          # would otherwise duplicate a release asset file name.
+          pattern: result-*
 
       - name: Release
         uses: softprops/action-gh-release@v1
