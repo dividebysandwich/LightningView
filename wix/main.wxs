@@ -260,9 +260,9 @@
                     </Component>
 
                     <!--
-                      FFmpeg 8.1.x (gyan.dev full-shared, LGPL) runtime libraries
+                      FFmpeg 9.0.x (gyan.dev full-shared, LGPL) runtime libraries
                       for video playback. The soname-versioned DLL names below
-                      (avcodec-62, avutil-60, ...) match the FFmpeg build pinned
+                      (avcodec-63, avutil-61, ...) match the FFmpeg build pinned
                       in .github/workflows/release.yml; bumping to a new FFmpeg
                       major version means updating these names to match the new
                       sonames or the MSI build will fail to find the files. The
@@ -270,24 +270,24 @@
                       so the $(var.CargoTargetBinDir) sources resolve.
                     -->
                     <Component Id='dll_avcodec' Guid='*'>
-                        <File Id='avcodec' Name='avcodec-62.dll' DiskId='1'
-                              Source='$(var.CargoTargetBinDir)\avcodec-62.dll' KeyPath='yes' />
+                        <File Id='avcodec' Name='avcodec-63.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\avcodec-63.dll' KeyPath='yes' />
                     </Component>
                     <Component Id='dll_avformat' Guid='*'>
-                        <File Id='avformat' Name='avformat-62.dll' DiskId='1'
-                              Source='$(var.CargoTargetBinDir)\avformat-62.dll' KeyPath='yes' />
+                        <File Id='avformat' Name='avformat-63.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\avformat-63.dll' KeyPath='yes' />
                     </Component>
                     <Component Id='dll_avutil' Guid='*'>
-                        <File Id='avutil' Name='avutil-60.dll' DiskId='1'
-                              Source='$(var.CargoTargetBinDir)\avutil-60.dll' KeyPath='yes' />
+                        <File Id='avutil' Name='avutil-61.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\avutil-61.dll' KeyPath='yes' />
                     </Component>
                     <Component Id='dll_swresample' Guid='*'>
-                        <File Id='swresample' Name='swresample-6.dll' DiskId='1'
-                              Source='$(var.CargoTargetBinDir)\swresample-6.dll' KeyPath='yes' />
+                        <File Id='swresample' Name='swresample-7.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\swresample-7.dll' KeyPath='yes' />
                     </Component>
                     <Component Id='dll_swscale' Guid='*'>
-                        <File Id='swscale' Name='swscale-9.dll' DiskId='1'
-                              Source='$(var.CargoTargetBinDir)\swscale-9.dll' KeyPath='yes' />
+                        <File Id='swscale' Name='swscale-10.dll' DiskId='1'
+                              Source='$(var.CargoTargetBinDir)\swscale-10.dll' KeyPath='yes' />
                     </Component>
 
                 </Directory>

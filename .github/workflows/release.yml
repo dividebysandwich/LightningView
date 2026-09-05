@@ -156,8 +156,8 @@ jobs:
           # Prebuilt FFmpeg full (GPL) shared dev build from gyan.dev.
           # ffmpeg-sys-next looks for $FFMPEG_DIR/include and $FFMPEG_DIR/lib.
           # gyan rotates the versioned /packages/ files (they 404 once superseded),
-          # so use the stable "latest release" URL. It currently ships FFmpeg 8.x,
-          # whose soname-versioned DLLs (avcodec-62.dll, ...) match the names
+          # so use the stable "latest release" URL. It currently ships FFmpeg 9.x,
+          # whose soname-versioned DLLs (avcodec-63.dll, ...) match the names
           # hard-coded in wix/main.wxs; if a future release bumps those majors,
           # update wix/main.wxs (and the MSI job's DLL check) to match.
           $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z'
@@ -349,7 +349,7 @@ jobs:
           $root = (Get-ChildItem ffmpeg-dist -Directory | Select-Object -First 1).FullName
           # Fail fast with a clear message if the release bumped soname majors,
           # rather than letting it surface later as a confusing WiX "file not found".
-          $expected = @('avcodec-62.dll','avformat-62.dll','avutil-60.dll','swresample-6.dll','swscale-9.dll')
+          $expected = @('avcodec-63.dll','avformat-63.dll','avutil-61.dll','swresample-7.dll','swscale-10.dll')
           foreach ($d in $expected) {
             if (-not (Test-Path "$root\bin\$d")) {
               throw "FFmpeg DLL '$d' not found in $root\bin — the gyan release likely bumped soname versions. Update wix/main.wxs and this list to the DLLs actually present."
