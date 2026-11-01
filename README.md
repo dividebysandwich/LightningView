@@ -31,6 +31,13 @@ Download the appropriate package from the [release page](https://github.com/divi
 
 Arch Linux users can install by running ```yay -S lightningview``` or ```paru -S lightningview```
 
+Gentoo users can install from the [darllowin_overlay](https://github.com/Darllowin/darllowin-overlay):
+```
+eselect repository add darllowin_overlay git https://github.com/Darllowin/darllowin-overlay.git
+emaint sync -r darllowin_overlay
+emerge -av media-gfx/lightningview::darllowin_overlay
+```
+
 ## Command Line Parameters
 
 To start viewing images:
